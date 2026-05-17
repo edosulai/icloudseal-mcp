@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+
+# Local data (NEVER commit)
+data/
+backups/
+*.db
+*.db-journal
+*.eml
+*.mbox
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

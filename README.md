@@ -2,7 +2,7 @@
 
 CRUD layer for iCloud Mail over IMAP. Designed to be **driven by an AI agent** (Cascade in Windsurf) — the agent does the thinking (classify, summarize, draft replies), this tool does the hands (fetch, move, delete, append).
 
-> **Status:** Phase 1 — foundation only. Read-only commands work end-to-end. Destructive operations (triage, apply) come in Phase 2.
+> **Status:** Phase 2 — read-only sync/list plus gated triage/apply. Mutating commands are dry-run by default and require `--apply`.
 
 ## Architecture
 
@@ -67,7 +67,7 @@ mail-agent stats
 
 Should print folder list with message counts. If you see them, you're done with Phase 1.
 
-## Commands (Phase 1)
+## Commands
 
 | Command | Action |
 |---|---|
@@ -77,8 +77,45 @@ Should print folder list with message counts. If you see them, you're done with 
 | `mail-agent list [--folder INBOX] [--limit 50]` | List cached messages (sender, subject, date) |
 | `mail-agent peek <uid> [--folder INBOX]` | Show body of a single message |
 | `mail-agent senders [--folder INBOX] [--top 30]` | Top senders by count (for triage decisions) |
+| `mail-agent triage ... --move-to <folder> --plan-file plan.json` | Build a dry-run move plan from cached metadata |
+| `mail-agent triage ... --delete --plan-file plan.json` | Build a dry-run delete plan from cached metadata |
+| `mail-agent apply plan.json` | Show what would be applied; does not mutate |
+| `mail-agent apply plan.json --apply` | Backup `.eml` files, then move/delete via IMAP |
 
-All Phase 1 commands are **read-only**. Phase 2 adds `triage` / `apply` (destructive, gated behind `--apply` flag).
+`triage` only reads the local cache. `apply` is the only command that mutates iCloud Mail, and it refuses to do so unless `--apply` is present.
+
+## Phase 2 workflow
+
+Start by syncing metadata:
+
+```bash
+mail-agent sync --folder INBOX --since 30d
+mail-agent senders --folder INBOX --top 30
+```
+
+Create a reviewed plan:
+
+```bash
+mail-agent triage \
+  --folder INBOX \
+  --sender-like newsletter \
+  --has-list-unsubscribe \
+  --older-than 30d \
+  --move-to Trash \
+  --plan-file plans/newsletters-to-trash.json
+```
+
+Review the generated JSON, then do a final dry-run:
+
+```bash
+mail-agent apply plans/newsletters-to-trash.json
+```
+
+Apply only after approval:
+
+```bash
+mail-agent apply plans/newsletters-to-trash.json --apply
+```
 
 ## Data location
 
@@ -89,7 +126,7 @@ All Phase 1 commands are **read-only**. Phase 2 adds `triage` / `apply` (destruc
 ## Safety model
 
 - **Dry-run by default.** Destructive operations require explicit `--apply`.
-- **Backup before delete.** Every email about to be deleted is first written to `backups/` as `.eml`.
+- **Backup before mutation.** Every email about to be moved or deleted is first written to `backups/` as `.eml`.
 - **Move, don't delete (when possible).** Prefer moving to `Bulk` / `Trash` folders over IMAP `\Deleted` flag.
 - **Local git.** Repo is git-init'd locally so config/rule changes are reversible.
 

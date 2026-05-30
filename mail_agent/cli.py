@@ -14,7 +14,8 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -23,6 +24,8 @@ from . import auth, cache
 from .imap_client import open_session
 
 console = Console()
+
+BACKUP_DIR = cache.DB_DIR / "backups"
 
 
 # ---- helpers -----------------------------------------------------------
@@ -37,10 +40,10 @@ def _parse_since(value: str | None) -> str | None:
         n = int(m.group(1))
         unit = m.group(2)
         delta = timedelta(days=n) if unit == "d" else timedelta(hours=n)
-        dt = datetime.now(timezone.utc) - delta
+        dt = datetime.now(UTC) - delta
     else:
         try:
-            dt = datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(value).replace(tzinfo=UTC)
         except ValueError as exc:
             raise SystemExit(f"Invalid --since value: {value!r}") from exc
     # IMAP wants "DD-Mon-YYYY" e.g. "01-Jan-2025"
@@ -53,6 +56,51 @@ def _human_size(n: int) -> str:
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
         n /= 1024
     return f"{n:.1f}TB"
+
+
+def _parse_age_cutoff(value: str | None) -> str | None:
+    """Convert "30d" / "12h" / ISO date into an ISO cutoff for cache queries."""
+    if value is None:
+        return None
+    m = re.fullmatch(r"(\d+)([dh])", value)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        delta = timedelta(days=n) if unit == "d" else timedelta(hours=n)
+        dt = datetime.now(UTC) - delta
+    else:
+        try:
+            dt = datetime.fromisoformat(value).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --older-than value: {value!r}") from exc
+    return dt.isoformat()
+
+
+def _write_json_file(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+
+
+def _load_plan(path: Path) -> dict:
+    try:
+        plan = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Cannot read plan file {path}: {exc}") from exc
+    if plan.get("version") != 1:
+        raise SystemExit("Unsupported plan version.")
+    if plan.get("action") not in {"move", "delete"}:
+        raise SystemExit("Plan action must be 'move' or 'delete'.")
+    if not isinstance(plan.get("messages"), list):
+        raise SystemExit("Plan is missing a messages list.")
+    return plan
+
+
+def _backup_message(imap, *, folder: str, uid: int, backup_root: Path) -> Path:
+    msg = imap.fetch_body(uid)
+    folder_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", folder).strip("_") or "folder"
+    out = backup_root / f"{folder_slug}-{uid}.eml"
+    out.write_bytes(msg.as_bytes())
+    return out
 
 
 # ---- commands ----------------------------------------------------------
@@ -245,13 +293,126 @@ def cmd_peek(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_triage(args: argparse.Namespace) -> int:
+    older_than_iso = _parse_age_cutoff(args.older_than)
+    with cache.connect() as conn:
+        rows = cache.find_messages(
+            conn,
+            folder=args.folder,
+            sender=args.sender,
+            sender_like=args.sender_like,
+            subject_like=args.subject_like,
+            older_than_iso=older_than_iso,
+            has_list_unsubscribe=args.has_list_unsubscribe,
+            limit=args.limit,
+        )
+
+    action = "delete" if args.delete else "move"
+    plan = {
+        "version": 1,
+        "created_at": cache.now_utc_iso(),
+        "source": "mail-agent triage",
+        "folder": args.folder,
+        "action": action,
+        "destination": args.move_to if action == "move" else None,
+        "filters": {
+            "sender": args.sender,
+            "sender_like": args.sender_like,
+            "subject_like": args.subject_like,
+            "older_than": args.older_than,
+            "older_than_iso": older_than_iso,
+            "has_list_unsubscribe": args.has_list_unsubscribe,
+        },
+        "messages": [dict(r) for r in rows],
+    }
+
+    if args.plan_file:
+        _write_json_file(Path(args.plan_file), plan)
+        console.print(f"[green]Wrote dry-run plan:[/green] {args.plan_file}")
+
+    if args.json:
+        print(json.dumps(plan, indent=2, default=str))
+        return 0
+
+    title = f"Dry-run triage plan: {action}"
+    if action == "move":
+        title += f" to {args.move_to}"
+    table = Table(title=title)
+    table.add_column("UID", justify="right", style="dim")
+    table.add_column("Date", style="cyan")
+    table.add_column("From")
+    table.add_column("Subject")
+    for r in rows:
+        sender = r["sender_name"] or r["sender_email"]
+        table.add_row(
+            str(r["uid"]),
+            (r["date_iso"] or "")[:10],
+            sender[:35],
+            (r["subject"] or "")[:70],
+        )
+    console.print(table)
+    console.print(
+        f"[yellow]Dry-run only.[/yellow] Review {len(rows)} message(s), then run "
+        "`mail-agent apply <plan.json> --apply` to mutate iCloud Mail."
+    )
+    return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    plan_path = Path(args.plan_file)
+    plan = _load_plan(plan_path)
+    messages = plan["messages"]
+    if not messages:
+        console.print("[yellow]Plan has no messages. Nothing to do.[/yellow]")
+        return 0
+
+    folder = plan["folder"]
+    action = plan["action"]
+    dest = plan.get("destination")
+    uids = [int(m["uid"]) for m in messages]
+
+    if not args.apply:
+        console.print(
+            f"[yellow]Dry-run.[/yellow] Would {action} {len(uids)} message(s) "
+            f"from {folder!r}. Add --apply to execute."
+        )
+        return 0
+
+    if action == "move" and not dest:
+        raise SystemExit("Move plan is missing destination.")
+
+    creds = auth.load_credentials()
+    backup_root = BACKUP_DIR / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    backup_root.mkdir(parents=True, exist_ok=False)
+
+    with open_session(creds.email, creds.password) as imap:
+        imap.select(folder, readonly=False)
+        for index, uid in enumerate(uids, 1):
+            path = _backup_message(imap, folder=folder, uid=uid, backup_root=backup_root)
+            console.print(f"[dim][{index}/{len(uids)}] backed up UID {uid} -> {path}[/dim]")
+        if action == "move":
+            imap.move(uids, dest)
+        else:
+            imap.mark_deleted(uids)
+            imap.expunge()
+
+    with cache.connect() as conn:
+        removed = cache.remove_cached_messages(conn, folder=folder, uids=uids)
+
+    console.print(
+        f"[green]Applied {action} to {len(uids)} message(s).[/green] "
+        f"Backup: {backup_root}. Cache rows removed: {removed}."
+    )
+    return 0
+
+
 # ---- argparse setup ----------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mail-agent",
-        description="CRUD layer for iCloud Mail (Phase 1: read-only).",
+        description="CRUD layer for iCloud Mail with dry-run triage and gated apply.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -286,6 +447,26 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-body-chars", type=int, default=4000)
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_peek)
+
+    sp = sub.add_parser("triage", help="Build a dry-run move/delete plan from cached metadata.")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--sender", help="Exact sender email match")
+    sp.add_argument("--sender-like", help="Substring match against sender name or email")
+    sp.add_argument("--subject-like", help="Substring match against subject")
+    sp.add_argument("--older-than", help="e.g. '30d', '24h', or '2025-01-01'")
+    sp.add_argument("--has-list-unsubscribe", action="store_true")
+    sp.add_argument("--limit", type=int, default=100)
+    action = sp.add_mutually_exclusive_group(required=True)
+    action.add_argument("--move-to", help="Destination folder for matched messages")
+    action.add_argument("--delete", action="store_true", help="Delete matched messages")
+    sp.add_argument("--plan-file", help="Write the dry-run plan to this JSON file")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_triage)
+
+    sp = sub.add_parser("apply", help="Apply a reviewed triage plan. Requires --apply.")
+    sp.add_argument("plan_file", help="JSON plan produced by `mail-agent triage`")
+    sp.add_argument("--apply", action="store_true", help="Actually mutate iCloud Mail")
+    sp.set_defaults(func=cmd_apply)
 
     return p
 

@@ -17,11 +17,11 @@ import email
 import imaplib
 import re
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
-from typing import Iterator
 
 IMAP_HOST = "imap.mail.me.com"
 IMAP_PORT = 993
@@ -121,7 +121,7 @@ class ICloudIMAP:
             self._conn = None
             self._selected = None
 
-    def __enter__(self) -> "ICloudIMAP":
+    def __enter__(self) -> ICloudIMAP:
         self.connect()
         return self
 

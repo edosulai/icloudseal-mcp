@@ -9,9 +9,10 @@ and privacy-sensitive.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Iterator
 
 from .imap_client import MessageMeta
 
@@ -142,6 +143,71 @@ def list_messages(
             (folder, limit, offset),
         )
     )
+
+
+def find_messages(
+    conn: sqlite3.Connection,
+    *,
+    folder: str,
+    sender: str | None = None,
+    sender_like: str | None = None,
+    subject_like: str | None = None,
+    older_than_iso: str | None = None,
+    has_list_unsubscribe: bool = False,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    """Find cached messages for a triage plan.
+
+    Matching stays intentionally simple and SQL-parameterized. More nuanced
+    classification belongs in the chat layer after the agent reads candidates.
+    """
+    clauses = ["folder = ?"]
+    params: list[object] = [folder]
+
+    if sender:
+        clauses.append("sender_email = ?")
+        params.append(sender.lower())
+    if sender_like:
+        clauses.append("(sender_email LIKE ? OR sender_name LIKE ?)")
+        pattern = f"%{sender_like}%"
+        params.extend([pattern, pattern])
+    if subject_like:
+        clauses.append("subject LIKE ?")
+        params.append(f"%{subject_like}%")
+    if older_than_iso:
+        clauses.append("date_iso < ?")
+        params.append(older_than_iso)
+    if has_list_unsubscribe:
+        clauses.append("list_unsub IS NOT NULL AND list_unsub != ''")
+
+    params.append(limit)
+    return list(
+        conn.execute(
+            f"""
+            SELECT uid, folder, sender_email, sender_name, subject, date_iso, size, flags,
+                   list_unsub
+            FROM messages
+            WHERE {" AND ".join(clauses)}
+            ORDER BY date_iso DESC
+            LIMIT ?
+            """,
+            params,
+        )
+    )
+
+
+def remove_cached_messages(
+    conn: sqlite3.Connection, *, folder: str, uids: Iterable[int]
+) -> int:
+    rows = [(folder, uid) for uid in uids]
+    if not rows:
+        return 0
+    conn.executemany("DELETE FROM messages WHERE folder = ? AND uid = ?", rows)
+    return len(rows)
+
+
+def now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def top_senders(

@@ -20,7 +20,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from . import auth, cache
+from . import auth, cache, jobs
 from .imap_client import open_session
 
 console = Console()
@@ -406,6 +406,90 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_jobs_collect(args: argparse.Namespace) -> int:
+    creds = auth.load_credentials()
+    since = _parse_since(args.since)
+    criteria = f"SINCE {since}" if since else "ALL"
+    leads = []
+    scanned = 0
+
+    with open_session(creds.email, creds.password) as imap:
+        total = imap.select(args.folder, readonly=True)
+        console.print(f"[dim]Selected {args.folder!r} (server reports {total} messages)[/dim]")
+        uids = imap.search_uids(criteria)
+        if args.limit:
+            uids = uids[-args.limit :]
+        console.print(f"Scanning {len(uids)} message(s) matching {criteria!r}")
+        metas = list(imap.fetch_metadata(uids))
+        for meta in metas:
+            if not jobs.is_job_alert(meta.sender_email, meta.sender_name, meta.subject):
+                continue
+            scanned += 1
+            msg = imap.fetch_body(meta.uid)
+            leads.extend(
+                lead.to_dict()
+                for lead in jobs.extract_job_leads(
+                    uid=meta.uid,
+                    sender_email=meta.sender_email,
+                    sender_name=meta.sender_name,
+                    subject=meta.subject,
+                    msg=msg,
+                )
+                if lead.score >= args.min_score
+            )
+
+    leads.sort(key=lambda item: item["score"], reverse=True)
+    plan = {
+        "version": 1,
+        "kind": "job-leads",
+        "created_at": cache.now_utc_iso(),
+        "source": "mail-agent jobs collect",
+        "folder": args.folder,
+        "filters": {
+            "since": args.since,
+            "criteria": criteria,
+            "limit": args.limit,
+            "min_score": args.min_score,
+        },
+        "messages_scanned": len(uids),
+        "job_alert_messages": scanned,
+        "leads": leads,
+        "approval_gate": {
+            "auto_apply": False,
+            "note": (
+                "Review leads before opening/applying. "
+                "This command never submits applications."
+            ),
+        },
+    }
+
+    if args.out:
+        _write_json_file(Path(args.out), plan)
+        console.print(f"[green]Wrote job lead plan:[/green] {args.out}")
+
+    if args.json:
+        print(json.dumps(plan, indent=2, default=str))
+        return 0
+
+    table = Table(title=f"Job leads from {scanned} job-alert message(s)")
+    table.add_column("Score", justify="right")
+    table.add_column("Provider")
+    table.add_column("Title")
+    table.add_column("Company")
+    table.add_column("Location")
+    for lead in leads[: args.top]:
+        table.add_row(
+            str(lead["score"]),
+            lead["provider"],
+            lead["title"][:45],
+            lead["company"][:28],
+            lead["location"][:24],
+        )
+    console.print(table)
+    console.print("[yellow]Review only.[/yellow] No applications were submitted.")
+    return 0
+
+
 # ---- argparse setup ----------------------------------------------------
 
 
@@ -467,6 +551,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("plan_file", help="JSON plan produced by `mail-agent triage`")
     sp.add_argument("--apply", action="store_true", help="Actually mutate iCloud Mail")
     sp.set_defaults(func=cmd_apply)
+
+    sp = sub.add_parser("jobs", help="Collect and score job-alert leads.")
+    job_sub = sp.add_subparsers(dest="jobs_cmd", required=True)
+
+    collect = job_sub.add_parser("collect", help="Extract scored job leads from email alerts.")
+    collect.add_argument("--folder", default="INBOX")
+    collect.add_argument("--since", default="7d", help="e.g. '7d', '24h', or '2025-01-01'")
+    collect.add_argument("--limit", type=int, default=50, help="Scan newest N matching messages")
+    collect.add_argument("--min-score", type=int, default=0)
+    collect.add_argument("--top", type=int, default=20, help="Rows to show in the table")
+    collect.add_argument("--out", help="Write review plan JSON")
+    collect.add_argument("--json", action="store_true")
+    collect.set_defaults(func=cmd_jobs_collect)
 
     return p
 

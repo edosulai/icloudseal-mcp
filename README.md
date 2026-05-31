@@ -81,6 +81,7 @@ Should print folder list with message counts. If you see them, you're done with 
 | `mail-agent triage ... --delete --plan-file plan.json` | Build a dry-run delete plan from cached metadata |
 | `mail-agent apply plan.json` | Show what would be applied; does not mutate |
 | `mail-agent apply plan.json --apply` | Backup `.eml` files, then move/delete via IMAP |
+| `mail-agent jobs collect --since 7d --out plans/jobs.json` | Extract and score job leads from job-alert emails; review-only |
 
 `triage` only reads the local cache. `apply` is the only command that mutates iCloud Mail, and it refuses to do so unless `--apply` is present.
 
@@ -116,6 +117,24 @@ Apply only after approval:
 ```bash
 mail-agent apply plans/newsletters-to-trash.json --apply
 ```
+
+## Job lead workflow
+
+Job-alert handling is intentionally separate from mailbox cleanup. The command below
+fetches matching alert bodies, extracts role/company/location/apply URLs, scores the
+leads locally, and writes a review plan. It never submits applications.
+
+```bash
+mail-agent jobs collect \
+  --folder INBOX \
+  --since 7d \
+  --limit 50 \
+  --min-score 35 \
+  --out plans/job-leads.json
+```
+
+Review the JSON before taking action. Future auto-apply automation should consume this
+plan and keep a human approval gate before opening links or submitting forms.
 
 ## Data location
 

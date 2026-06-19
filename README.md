@@ -5,10 +5,14 @@ thinking (classify, summarize, decide); this tool does the hands (fetch, list,
 create, move, delete). Started as `icloud-mail-agent` (mail only); now a
 multi-domain agent.
 
-> **Status**
-> - **Mail (IMAP)** — stable: sync/list/triage plus gated cleanup & job leads.
-> - **Contacts (CardDAV)** — new: live list/search/export plus gated create/update/delete.
-> - **Calendar/Reminders, Messages/SMS, Notes, Drive** — planned (see Roadmap).
+> **Status — six domains live**
+> - **Mail (IMAP)** — sync/list/triage plus gated cleanup & job leads.
+> - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
+> - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/rm/done.
+> - **Messages / SMS** — read `chat.db` (chats/list/search/export) plus gated AppleScript send.
+> - **Notes (AppleScript)** — list/search/read plus gated create/delete.
+> - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
+> - **Photos** — not yet (only remaining domain; see Roadmap).
 >
 > Mutating commands are dry-run by default and require `--apply`.
 
@@ -30,19 +34,19 @@ So `mail-agent list` and `icloud-agent mail list` are identical.
             └──────────────┬───────────────┘
                            │ shell
                            ▼
-        ┌──────────────────────────────────────┐
-        │  icloud_agent/                        │
-        │   auth.py     macOS Keychain creds    │
-        │   paths.py    shared storage paths     │
-        │   common.py   shared CLI helpers       │
-        │   cli.py      icloud-agent / mail-agent│
-        │   mail/       IMAP (imap_client+cache) │
-        │   contacts/   CardDAV (carddav)        │
-        │   dav/        shared CardDAV/CalDAV     │
-        └───────┬───────────────────┬────────────┘
-        IMAP/SSL│                   │ CardDAV/HTTPS
-                ▼                   ▼
-      imap.mail.me.com:993   contacts.icloud.com
+        ┌──────────────────────────────────────────┐
+        │  icloud_agent/                            │
+        │   auth/paths/common   shared infra        │
+        │   cli.py     icloud-agent / mail-agent    │
+        │   dav/       shared CardDAV/CalDAV client  │
+        │   mail/      IMAP        contacts/ CardDAV │
+        │   calendar/  CalDAV      messages/ chat.db │
+        │   notes/     AppleScript drive/    fs      │
+        └──┬────────┬────────┬────────┬────────┬─────┘
+       IMAP│   DAV  │  CalDAV│  SQLite│ Apple- │ fs
+           ▼        ▼        ▼   +AS  ▼ Script ▼
+   imap.mail   contacts. caldav.  chat.db  Notes.app /
+   .me.com     icloud    icloud   (FDA)    CloudDocs
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
@@ -111,13 +115,67 @@ icloud-agent contacts list --limit 5   # lists contacts (CardDAV)
 Write commands print a dry-run preview and do nothing until `--apply` is added.
 `update`/`delete` back up the affected vCards to `backups/` first.
 
+## Calendar + Reminders commands (`icloud-agent calendar …`)
+
+| Command | Action |
+|---|---|
+| `calendars [--json]` | List calendars and reminder lists |
+| `events [--days 30] [--json]` | Upcoming events |
+| `reminders [--all] [--json]` | Reminders (open by default) |
+| `event-add --title --start [--end --location --calendar --all-day] [--apply]` | Create event |
+| `event-rm <query> [--apply]` | Delete event (`.ics` backed up) |
+| `reminder-add --title [--due --list] [--apply]` | Create reminder |
+| `reminder-done <query> [--apply]` | Mark reminder complete |
+| `reminder-rm <query> [--apply]` | Delete reminder (`.ics` backed up) |
+
+Dates: `YYYY-MM-DD` (all-day) or `YYYY-MM-DD HH:MM` (timed).
+
+## Messages commands (`icloud-agent messages …`)
+
+Reads need **Full Disk Access** on the running terminal/app.
+
+| Command | Action |
+|---|---|
+| `chats [--limit 30]` | Recent conversations |
+| `list <chat> [--limit 40]` | Messages in a conversation (id or name fragment) |
+| `search <query> [--limit]` | Search message text |
+| `export <chat> <file.json>` | Export a conversation |
+| `send --to <handle> --text "…" [--service imessage\|sms] [--apply]` | Send via Messages.app |
+
+Sending is driven through Messages.app via AppleScript; SMS only works with iPhone Text Message Forwarding enabled.
+
+## Notes commands (`icloud-agent notes …`)
+
+| Command | Action |
+|---|---|
+| `list [--limit] [--json]` / `search <q>` / `read <q>` | Browse notes |
+| `create --title … [--body …] [--apply]` | Create a note |
+| `delete <q> [--apply]` | Delete a note (body backed up to `backups/`) |
+
+## iCloud Drive commands (`icloud-agent drive …`)
+
+Paths are relative to the iCloud Drive root.
+
+| Command | Action |
+|---|---|
+| `ls [path]` / `tree [path] [--depth]` / `find <glob> [path]` | Browse |
+| `read <path>` | Print a text file (truncated at 200 KB) |
+| `put <local> <dest> [--apply]` | Copy a local file into iCloud Drive |
+| `rm <path> [--apply]` | Move an item to the macOS Trash (never permanent) |
+
 ## Safety model
 
 - **Dry-run by default.** Destructive ops require explicit `--apply`.
-- **Backup before mutation.** Mail → `.eml`; contacts → `.vcf` under `backups/`.
-- **ETag-guarded writes.** Contact updates/deletes use `If-Match` so concurrent
-  edits don't get clobbered; creates use `If-None-Match: *`.
-- **One credential, least surprise.** Same Keychain item as mail.
+- **Backup before mutation.** Mail → `.eml`, contacts → `.vcf`, calendar → `.ics`,
+  notes → `.txt`, all under `backups/`. Drive `rm` goes to the macOS Trash.
+- **ETag-guarded DAV writes.** Contact/calendar updates & deletes use `If-Match`
+  so concurrent edits aren't clobbered; creates use `If-None-Match: *`.
+- **Read-only Messages DB.** `chat.db` is opened `mode=ro&immutable=1`; the tool
+  never writes to it.
+- **Drive sandboxing.** Drive paths are resolved and rejected if they escape the
+  iCloud Drive root.
+- **One credential, least surprise.** Same Keychain item authenticates IMAP,
+  CardDAV, and CalDAV.
 
 ## Data location
 
@@ -126,19 +184,25 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 - Backups: `~/Library/Application Support/icloud-mail-agent/backups/`
 - Plans: `~/Library/Application Support/icloud-mail-agent/plans/`
 
-## Roadmap (planned domains)
+## Access mechanics per domain
 
-Access mechanics differ per domain — three tiers:
+Three tiers, by how macOS exposes each service:
 
-| Domain | Mechanism | Credential | Notes |
-|---|---|---|---|
-| **Calendar + Reminders** | CalDAV (`caldav.icloud.com`) | same app-specific password | Reuses `dav/` client; next up. |
-| **Messages / SMS** | local `~/Library/Messages/chat.db` (read) + AppleScript (send) | **Full Disk Access** (TCC) | Mac-local only; sending is fragile. |
-| **Notes** | AppleScript / local SQLite | Full Disk Access | CRUD via AppleScript. |
-| **iCloud Drive** | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — | Plain file ops. |
+| Domain | Mechanism | Credential / permission |
+|---|---|---|
+| Mail | IMAP `imap.mail.me.com` | app-specific password |
+| Contacts | CardDAV `contacts.icloud.com` | app-specific password |
+| Calendar + Reminders | CalDAV `caldav.icloud.com` | app-specific password |
+| Messages / SMS | local `~/Library/Messages/chat.db` (read) + AppleScript (send) | **Full Disk Access** + Automation |
+| Notes | AppleScript (Notes.app) | Automation |
+| iCloud Drive | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — |
 
-CalDAV is the cleanest next step because it reuses the proven `dav/` discovery
-the Contacts domain validated.
+## Roadmap
+
+- **Photos** — the only domain not yet implemented. Path: PhotoKit / the
+  `osxphotos` library, or AppleScript for basic export. Requires the Photos TCC
+  permission. Read/export first; album edits later.
+- **Scheduled cleanup** — optional LaunchAgent for recurring `mail cleanup strict`.
 
 ## Why not a unified iCloud API?
 

@@ -1,0 +1,227 @@
+"""iCloud Calendar + Reminders (CalDAV) commands.
+
+Read commands hit iCloud live. Mutating commands preview then require
+``--apply``; deletes/updates back up the raw ``.ics`` first.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import uuid
+from pathlib import Path
+
+from rich.table import Table
+
+from ..common import console
+from ..paths import BACKUP_DIR, timestamp_slug
+from . import caldav
+from .caldav import CalendarSession, CalItem
+
+
+def _backup(items: list[CalItem], label: str) -> Path:
+    root = BACKUP_DIR / f"calendar-{label}-{timestamp_slug()}"
+    root.mkdir(parents=True, exist_ok=True)
+    for it in items:
+        if it.raw:
+            (root / f"{it.uid}.ics").write_text(it.raw)
+    return root
+
+
+def _resolve_one(items: list[CalItem], query: str) -> CalItem:
+    by_uid = [i for i in items if i.uid == query]
+    if by_uid:
+        return by_uid[0]
+    matched = [i for i in items if caldav.matches(i, query)]
+    if not matched:
+        raise SystemExit(f"No item matches {query!r}.")
+    if len(matched) > 1:
+        raise SystemExit(f"{len(matched)} items match {query!r}; be more specific.")
+    return matched[0]
+
+
+# ---- read --------------------------------------------------------------
+
+
+def cmd_calendars(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    cols = session.collections()
+    if args.json:
+        print(json.dumps(
+            [{"name": c.name, "url": c.url, "components": sorted(c.components)} for c in cols],
+            indent=2,
+        ))
+        return 0
+    table = Table(title=f"iCloud calendars & reminder lists ({len(cols)})")
+    table.add_column("Name")
+    table.add_column("Type")
+    for c in cols:
+        kind = "events" if c.is_events else ("reminders" if c.is_reminders else "?")
+        table.add_row(c.name, kind)
+    console.print(table)
+    return 0
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    events = session.list_events(days=args.days)
+    if args.json:
+        print(json.dumps([e.to_dict() for e in events], indent=2))
+        return 0
+    table = Table(title=f"Upcoming events (next {args.days}d, {len(events)})")
+    table.add_column("Start", style="cyan")
+    table.add_column("End", style="dim")
+    table.add_column("Summary")
+    table.add_column("Location", style="dim")
+    for e in events:
+        table.add_row(e.start, e.end, e.summary[:40], e.location[:24])
+    console.print(table)
+    return 0
+
+
+def cmd_reminders(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    rem = session.list_reminders(include_completed=args.all)
+    if args.json:
+        print(json.dumps([r.to_dict() for r in rem], indent=2))
+        return 0
+    table = Table(title=f"Reminders ({'all' if args.all else 'open'}, {len(rem)})")
+    table.add_column("Due", style="cyan")
+    table.add_column("Status", style="dim")
+    table.add_column("Summary")
+    for r in rem:
+        table.add_row(r.start or "-", r.status or "NEEDS-ACTION", r.summary[:50])
+    console.print(table)
+    return 0
+
+
+# ---- write -------------------------------------------------------------
+
+
+def cmd_event_add(args: argparse.Namespace) -> int:
+    uid = str(uuid.uuid4()).upper()
+    ics = caldav.build_event(
+        uid=uid, summary=args.title, start=args.start, end=args.end,
+        location=args.location or "", all_day=args.all_day,
+    )
+    console.rule("New event (dry-run)")
+    console.print(ics)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to create.")
+        return 0
+    session = CalendarSession.connect()
+    col = session.find_collection(args.calendar, events=True)
+    href = session.put_item(col.url, uid, ics)
+    console.print(f"[green]Created event[/green] {args.title} in {col.name} -> {href}")
+    return 0
+
+
+def cmd_event_rm(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    target = _resolve_one(session.list_events(days=args.days), args.query)
+    console.print(f"Would delete event: [bold]{target.summary}[/bold] ({target.start})")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to delete (.ics backed up first).")
+        return 0
+    backup = _backup([target], "event-delete")
+    session.delete(target)
+    console.print(f"[green]Deleted event[/green] {target.summary}. Backup: {backup}")
+    return 0
+
+
+def cmd_reminder_add(args: argparse.Namespace) -> int:
+    uid = str(uuid.uuid4()).upper()
+    ics = caldav.build_reminder(uid=uid, summary=args.title, due=args.due)
+    console.rule("New reminder (dry-run)")
+    console.print(ics)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to create.")
+        return 0
+    session = CalendarSession.connect()
+    col = session.find_collection(args.list, events=False)
+    href = session.put_item(col.url, uid, ics)
+    console.print(f"[green]Created reminder[/green] {args.title} in {col.name} -> {href}")
+    return 0
+
+
+def cmd_reminder_done(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    target = _resolve_one(session.list_reminders(include_completed=True), args.query)
+    ics = caldav.build_reminder(uid=target.uid, summary=target.summary, due=target.start or None,
+                                completed=True)
+    console.print(f"Would mark complete: [bold]{target.summary}[/bold]")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to complete it.")
+        return 0
+    backup = _backup([target], "reminder-done")
+    session.update(target, ics)
+    console.print(f"[green]Completed reminder[/green] {target.summary}. Backup: {backup}")
+    return 0
+
+
+def cmd_reminder_rm(args: argparse.Namespace) -> int:
+    session = CalendarSession.connect()
+    target = _resolve_one(session.list_reminders(include_completed=True), args.query)
+    console.print(f"Would delete reminder: [bold]{target.summary}[/bold]")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to delete (.ics backed up first).")
+        return 0
+    backup = _backup([target], "reminder-delete")
+    session.delete(target)
+    console.print(f"[green]Deleted reminder[/green] {target.summary}. Backup: {backup}")
+    return 0
+
+
+# ---- registration ------------------------------------------------------
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    sp = sub.add_parser("calendars", help="List calendars and reminder lists.")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_calendars)
+
+    sp = sub.add_parser("events", help="List upcoming events.")
+    sp.add_argument("--days", type=int, default=30)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_events)
+
+    sp = sub.add_parser("reminders", help="List reminders (open by default).")
+    sp.add_argument("--all", action="store_true", help="Include completed")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_reminders)
+
+    sp = sub.add_parser("event-add", help="Create an event. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--start", required=True, help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
+    sp.add_argument("--end", help="Same format as --start")
+    sp.add_argument("--location")
+    sp.add_argument("--calendar", help="Target calendar name (default: first)")
+    sp.add_argument("--all-day", action="store_true")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_event_add)
+
+    sp = sub.add_parser("event-rm", help="Delete an event by UID or unique match.")
+    sp.add_argument("query")
+    sp.add_argument("--days", type=int, default=365, help="Search window")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_event_rm)
+
+    sp = sub.add_parser("reminder-add", help="Create a reminder. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--due", help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
+    sp.add_argument("--list", help="Target reminder list name (default: first)")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reminder_add)
+
+    sp = sub.add_parser("reminder-done", help="Mark a reminder complete. Requires --apply.")
+    sp.add_argument("query")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reminder_done)
+
+    sp = sub.add_parser("reminder-rm", help="Delete a reminder. Requires --apply.")
+    sp.add_argument("query")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reminder_rm)
+
+
+__all__ = ["register"]

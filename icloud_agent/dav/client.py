@@ -75,6 +75,10 @@ class DavClient:
         except ET.ParseError as exc:
             raise DavError(f"Invalid XML from {url}: {exc}") from exc
 
+    def propfind(self, url: str, body: str, *, depth: str = "0") -> ET.Element:
+        """Public PROPFIND for domain modules that need custom properties."""
+        return self._propfind(url, body, depth=depth)
+
     def report(self, url: str, body: str, *, depth: str = "1") -> ET.Element:
         resp = self._session.request(
             "REPORT",

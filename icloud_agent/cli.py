@@ -14,15 +14,35 @@ import argparse
 import sys
 
 from . import auth
+from .calendar import commands as calendar_commands
 from .common import console
 from .contacts import commands as contacts_commands
+from .drive import commands as drive_commands
 from .mail import commands as mail_commands
+from .messages import commands as messages_commands
+from .notes import commands as notes_commands
 
 DOMAINS = {
     "mail": ("iCloud Mail (IMAP): triage, cleanup, job leads.", mail_commands.register),
     "contacts": (
         "iCloud Contacts (CardDAV): list, search, gated CRUD.",
         contacts_commands.register,
+    ),
+    "calendar": (
+        "iCloud Calendar + Reminders (CalDAV): list, gated add/rm/done.",
+        calendar_commands.register,
+    ),
+    "messages": (
+        "iMessage/SMS: read chat.db (needs Full Disk Access), gated send.",
+        messages_commands.register,
+    ),
+    "notes": (
+        "iCloud Notes (AppleScript): list/read, gated create/delete.",
+        notes_commands.register,
+    ),
+    "drive": (
+        "iCloud Drive (filesystem): ls/tree/find/read, gated put/rm.",
+        drive_commands.register,
     ),
 }
 

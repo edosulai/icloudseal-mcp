@@ -12,12 +12,12 @@ import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 
+from ..paths import APP_DIR, DB_PATH, ensure_app_dir
 from .imap_client import MessageMeta
 
-DB_DIR = Path.home() / "Library" / "Application Support" / "icloud-mail-agent"
-DB_PATH = DB_DIR / "cache.db"
+# Backward-compatible alias; canonical location lives in icloud_agent.paths.
+DB_DIR = APP_DIR
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -47,13 +47,9 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 
-def _ensure_dir() -> None:
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-
-
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
-    _ensure_dir()
+    ensure_app_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:

@@ -1,174 +1,148 @@
-# icloud-mail-agent
+# icloud-agent
 
-CRUD layer for iCloud Mail over IMAP. Designed to be **driven by an AI agent** (Cascade in Windsurf) — the agent does the thinking (classify, summarize, draft replies), this tool does the hands (fetch, move, delete, append).
+CRUD layer for **iCloud services** — driven by an AI agent. The agent does the
+thinking (classify, summarize, decide); this tool does the hands (fetch, list,
+create, move, delete). Started as `icloud-mail-agent` (mail only); now a
+multi-domain agent.
 
-> **Status:** Phase 2 — read-only sync/list plus gated triage/apply. Mutating commands are dry-run by default and require `--apply`.
+> **Status**
+> - **Mail (IMAP)** — stable: sync/list/triage plus gated cleanup & job leads.
+> - **Contacts (CardDAV)** — new: live list/search/export plus gated create/update/delete.
+> - **Calendar/Reminders, Messages/SMS, Notes, Drive** — planned (see Roadmap).
+>
+> Mutating commands are dry-run by default and require `--apply`.
+
+## Two CLIs, one command set
+
+| Command | Scope |
+|---|---|
+| `icloud-agent <domain> <action>` | Multi-domain entry point (`mail`, `contacts`, …) |
+| `mail-agent <action>` | Legacy alias = `icloud-agent mail <action>` (kept for back-compat) |
+
+So `mail-agent list` and `icloud-agent mail list` are identical.
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────┐
-│  Cascade (Windsurf chat)                   │
-│  - reads stats / metadata                  │
-│  - proposes triage plan                    │
-│  - asks user for approval                  │
-└──────────────┬─────────────────────────────┘
-               │ shell
-               ▼
-┌────────────────────────────────────────────┐
-│  mail-agent CLI                            │
-│  - auth.py  (macOS Keychain)               │
-│  - imap_client.py  (imaplib wrapper)       │
-│  - cache.py  (SQLite metadata cache)       │
-│  - cli.py  (subcommands)                   │
-└──────────────┬─────────────────────────────┘
-               │ IMAP/SSL
-               ▼
-┌────────────────────────────────────────────┐
-│  imap.mail.me.com:993                      │
-└────────────────────────────────────────────┘
+            ┌──────────────────────────────┐
+            │  AI agent (chat session)     │
+            │  reads → proposes → asks      │
+            └──────────────┬───────────────┘
+                           │ shell
+                           ▼
+        ┌──────────────────────────────────────┐
+        │  icloud_agent/                        │
+        │   auth.py     macOS Keychain creds    │
+        │   paths.py    shared storage paths     │
+        │   common.py   shared CLI helpers       │
+        │   cli.py      icloud-agent / mail-agent│
+        │   mail/       IMAP (imap_client+cache) │
+        │   contacts/   CardDAV (carddav)        │
+        │   dav/        shared CardDAV/CalDAV     │
+        └───────┬───────────────────┬────────────┘
+        IMAP/SSL│                   │ CardDAV/HTTPS
+                ▼                   ▼
+      imap.mail.me.com:993   contacts.icloud.com
 ```
 
-**No external LLM API.** Email content stays on this Mac except for what enters the chat session.
+**One credential for everything.** The same iCloud app-specific password in the
+Keychain (service `icloud-mail-agent`) authenticates IMAP **and** CardDAV/CalDAV.
+**No external LLM API** — data stays on this Mac except what enters the chat.
+
+## Why the storage name stays `icloud-mail-agent`
+
+The project was renamed `icloud-mail-agent` → `icloud-agent`, but the on-disk
+directory `~/Library/Application Support/icloud-mail-agent/` and the Keychain
+service name `icloud-mail-agent` are intentionally **unchanged**, so the existing
+app-specific password, metadata cache, and historical backups keep working.
 
 ## Setup (one-time)
 
-### 1. Generate app-specific password
-
-iCloud blocks regular passwords for IMAP. You need an app-specific password.
-
-1. Go to <https://appleid.apple.com>
-2. Sign in → **Sign-In and Security** → **App-Specific Passwords**
-3. Click **+** → label it `mail-agent` → generate
-4. Copy the password (format: `xxxx-xxxx-xxxx-xxxx`)
+### 1. App-specific password
+iCloud blocks regular passwords for IMAP/CardDAV. Generate one at
+<https://appleid.apple.com> → **Sign-In and Security** → **App-Specific
+Passwords** (format `xxxx-xxxx-xxxx-xxxx`).
 
 ### 2. Install
-
 ```bash
-cd /Users/Shared/Development/tools/icloud-mail-agent
-python3 -m venv .venv
+cd /Users/Shared/Development/tools/icloud-agent
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-### 3. Store credentials in macOS Keychain
-
+### 3. Store credentials
 ```bash
-mail-agent setup --email you@icloud.com
-# Will prompt for the app-specific password (hidden input)
-# Stores it securely in macOS Keychain — never written to disk in plaintext.
+icloud-agent mail setup --email you@icloud.com   # or: mail-agent setup --email ...
 ```
 
-### 4. Verify connection
-
+### 4. Verify
 ```bash
-mail-agent stats
+icloud-agent mail stats          # lists mail folders + counts (IMAP)
+icloud-agent contacts list --limit 5   # lists contacts (CardDAV)
 ```
 
-Should print folder list with message counts. If you see them, you're done with Phase 1.
-
-## Commands
+## Mail commands (`icloud-agent mail …` / `mail-agent …`)
 
 | Command | Action |
 |---|---|
-| `mail-agent setup --email <addr>` | Store credentials in Keychain (one-time) |
-| `mail-agent stats` | Show folder list + message counts |
-| `mail-agent sync [--folder INBOX] [--since 7d]` | Pull metadata into local SQLite cache |
-| `mail-agent list [--folder INBOX] [--limit 50]` | List cached messages (sender, subject, date) |
-| `mail-agent peek <uid> [--folder INBOX]` | Show body of a single message |
-| `mail-agent senders [--folder INBOX] [--top 30]` | Top senders by count (for triage decisions) |
-| `mail-agent triage ... --move-to <folder> --plan-file plan.json` | Build a dry-run move plan from cached metadata |
-| `mail-agent triage ... --delete --plan-file plan.json` | Build a dry-run delete plan from cached metadata |
-| `mail-agent apply plan.json` | Show what would be applied; does not mutate |
-| `mail-agent apply plan.json --apply` | Backup `.eml` files, then move/delete via IMAP |
-| `mail-agent cleanup strict [--apply]` | Full-sync INBOX, then plan/delete known bulk promo and job-alert senders |
-| `mail-agent jobs collect --since 7d --out plans/jobs.json` | Extract and score job leads from job-alert emails; review-only |
+| `setup --email <addr>` | Store credentials in Keychain (one-time) |
+| `stats` | Folder list + message counts |
+| `sync [--folder INBOX] [--since 7d]` | Pull metadata into local SQLite cache |
+| `list [--folder INBOX] [--limit 50]` | List cached messages |
+| `peek <uid>` | Show body of one message |
+| `senders [--top 30]` | Top senders by count |
+| `triage … --move-to <f> / --delete --plan-file p.json` | Build a dry-run plan |
+| `apply p.json [--apply]` | Backup `.eml`, then move/delete via IMAP |
+| `cleanup strict [--apply]` | Full-sync INBOX, plan/delete known bulk senders |
+| `jobs collect --since 7d --out p.json` | Extract & score job leads (review-only) |
 
-`triage` only reads the local cache. `apply` is the only command that mutates iCloud Mail, and it refuses to do so unless `--apply` is present.
+## Contacts commands (`icloud-agent contacts …`)
 
-## Phase 2 workflow
+| Command | Action |
+|---|---|
+| `list [--limit N] [--json]` | List all contacts (live CardDAV) |
+| `search <query> [--json]` | Match by name / email / phone / org |
+| `export <file.json\|file.vcf>` | Export all contacts |
+| `create --name … [--email … --phone … --org …] [--apply]` | Create a contact |
+| `update <uid\|query> [--name --add-email --set-phone …] [--apply]` | Update a contact |
+| `delete <query> [--apply]` | Delete matching contacts (vCards backed up first) |
 
-Start by syncing metadata:
+Write commands print a dry-run preview and do nothing until `--apply` is added.
+`update`/`delete` back up the affected vCards to `backups/` first.
 
-```bash
-mail-agent sync --folder INBOX --since 30d
-mail-agent senders --folder INBOX --top 30
-```
+## Safety model
 
-Create a reviewed plan:
-
-```bash
-mail-agent triage \
-  --folder INBOX \
-  --sender-like newsletter \
-  --has-list-unsubscribe \
-  --older-than 30d \
-  --move-to Trash \
-  --plan-file plans/newsletters-to-trash.json
-```
-
-Review the generated JSON, then do a final dry-run:
-
-```bash
-mail-agent apply plans/newsletters-to-trash.json
-```
-
-Apply only after approval:
-
-```bash
-mail-agent apply plans/newsletters-to-trash.json --apply
-```
-
-## Strict automatic cleanup
-
-For routine bulk cleanup, use the strict workflow. It syncs the whole INBOX,
-matches only explicit bulk sender addresses, writes a JSON plan, and stays
-dry-run unless `--apply` is present.
-
-```bash
-mail-agent cleanup strict
-```
-
-Delete the matched bulk mail after review:
-
-```bash
-mail-agent cleanup strict --apply
-```
-
-The strict policy intentionally excludes account/security alerts, receipts,
-GitHub notifications, financial transaction mail, and human LinkedIn messages.
-
-## Job lead workflow
-
-Job-alert handling is intentionally separate from mailbox cleanup. The command below
-fetches matching alert bodies, extracts role/company/location/apply URLs, scores the
-leads locally, and writes a review plan. It never submits applications.
-
-```bash
-mail-agent jobs collect \
-  --folder INBOX \
-  --since 7d \
-  --limit 50 \
-  --min-score 35 \
-  --out plans/job-leads.json
-```
-
-Review the JSON before taking action. Future auto-apply automation should consume this
-plan and keep a human approval gate before opening links or submitting forms.
+- **Dry-run by default.** Destructive ops require explicit `--apply`.
+- **Backup before mutation.** Mail → `.eml`; contacts → `.vcf` under `backups/`.
+- **ETag-guarded writes.** Contact updates/deletes use `If-Match` so concurrent
+  edits don't get clobbered; creates use `If-None-Match: *`.
+- **One credential, least surprise.** Same Keychain item as mail.
 
 ## Data location
 
 - Credentials: macOS Keychain, service `icloud-mail-agent`
 - Cache DB: `~/Library/Application Support/icloud-mail-agent/cache.db`
-- Backups (Phase 2): `~/Library/Application Support/icloud-mail-agent/backups/`
+- Backups: `~/Library/Application Support/icloud-mail-agent/backups/`
+- Plans: `~/Library/Application Support/icloud-mail-agent/plans/`
 
-## Safety model
+## Roadmap (planned domains)
 
-- **Dry-run by default.** Destructive operations require explicit `--apply`.
-- **Backup before mutation.** Every email about to be moved or deleted is first written to `backups/` as `.eml`.
-- **Move, don't delete (when possible).** Prefer moving to `Bulk` / `Trash` folders over IMAP `\Deleted` flag.
-- **Local git.** Repo is git-init'd locally so config/rule changes are reversible.
+Access mechanics differ per domain — three tiers:
 
-## Why not pyicloud / iCloud API?
+| Domain | Mechanism | Credential | Notes |
+|---|---|---|---|
+| **Calendar + Reminders** | CalDAV (`caldav.icloud.com`) | same app-specific password | Reuses `dav/` client; next up. |
+| **Messages / SMS** | local `~/Library/Messages/chat.db` (read) + AppleScript (send) | **Full Disk Access** (TCC) | Mac-local only; sending is fragile. |
+| **Notes** | AppleScript / local SQLite | Full Disk Access | CRUD via AppleScript. |
+| **iCloud Drive** | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — | Plain file ops. |
 
-Apple does not expose a public iCloud Mail API. The only stable interface is IMAP, which is what every mail client (Mail.app, Thunderbird, etc.) uses. App-specific password + IMAP is the supported path.
+CalDAV is the cleanest next step because it reuses the proven `dav/` discovery
+the Contacts domain validated.
+
+## Why not a unified iCloud API?
+
+Apple exposes **no** public iCloud REST API. Mail = IMAP, Contacts/Calendar =
+CardDAV/CalDAV (all app-specific-password auth). Messages/Notes have no remote
+API at all — only on-device data stores. This tool meets each domain on its own
+supported interface rather than relying on a fragile reverse-engineered client.

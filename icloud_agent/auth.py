@@ -10,10 +10,14 @@ from __future__ import annotations
 import getpass
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 
+from .paths import APP_DIR
+
+# Keychain service stays "icloud-mail-agent" so the existing app-specific
+# password keeps working after the project rename. The same credential is used
+# for IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
 SERVICE_NAME = "icloud-mail-agent"
-CONFIG_DIR = Path.home() / "Library" / "Application Support" / "icloud-mail-agent"
+CONFIG_DIR = APP_DIR
 EMAIL_FILE = CONFIG_DIR / "email"
 
 

@@ -3,14 +3,15 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "icloud-mail-agent"
-version = "0.1.0"
-description = "Agent-driven CRUD layer for iCloud Mail (IMAP). Cascade is the brain, this is the hands."
+name = "icloud-agent"
+version = "0.2.0"
+description = "Agent-driven CRUD layer for iCloud services (Mail/IMAP, Contacts/CardDAV, ...). The agent is the brain, this is the hands."
 requires-python = ">=3.11"
 authors = [{ name = "Edo Sulai" }]
 license = { text = "MIT" }
 dependencies = [
     "rich>=13.7",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -20,11 +21,12 @@ dev = [
 ]
 
 [project.scripts]
-mail-agent = "mail_agent.cli:main"
+icloud-agent = "icloud_agent.cli:main"
+mail-agent = "icloud_agent.cli:mail_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mail_agent*"]
+include = ["icloud_agent*"]
 
 [tool.ruff]
 line-length = 100

@@ -1,11 +1,11 @@
-"""CLI entry point for mail-agent.
+"""iCloud Mail (IMAP) commands.
 
-All Phase 1 commands are read-only. Designed to be invoked by Cascade
-during chat sessions to gather context, then by the user once a plan is
-approved.
+Read commands gather context; mutating commands go through a dry-run plan and a
+gated ``--apply`` that backs up every message as ``.eml`` before deletion.
 
-Output: Rich tables for human-readable; pass --json for machine-readable
-output that the agent can paste back into context.
+``register(subparsers)`` mounts these as subcommands so both the top-level
+``icloud-agent mail ...`` CLI and the legacy ``mail-agent ...`` CLI can reuse
+the exact same command set.
 """
 
 from __future__ import annotations
@@ -13,72 +13,21 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from rich.console import Console
-from rich.table import Table
-
-from . import auth, cache, cleanup, jobs
+from .. import auth
+from ..common import (
+    console,
+    human_size,
+    parse_age_cutoff,
+    parse_since,
+    write_json_file,
+)
+from ..paths import BACKUP_DIR, default_plan_path, now_utc_iso
+from . import cache, cleanup, jobs
 from .imap_client import open_session
 
-console = Console()
-
-BACKUP_DIR = cache.DB_DIR / "backups"
-
-
 # ---- helpers -----------------------------------------------------------
-
-
-def _parse_since(value: str | None) -> str | None:
-    """Convert "7d" / "24h" / "2025-01-01" to IMAP date format (DD-Mon-YYYY)."""
-    if not value:
-        return None
-    m = re.fullmatch(r"(\d+)([dh])", value)
-    if m:
-        n = int(m.group(1))
-        unit = m.group(2)
-        delta = timedelta(days=n) if unit == "d" else timedelta(hours=n)
-        dt = datetime.now(UTC) - delta
-    else:
-        try:
-            dt = datetime.fromisoformat(value).replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise SystemExit(f"Invalid --since value: {value!r}") from exc
-    # IMAP wants "DD-Mon-YYYY" e.g. "01-Jan-2025"
-    return dt.strftime("%d-%b-%Y")
-
-
-def _human_size(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
-        n /= 1024
-    return f"{n:.1f}TB"
-
-
-def _parse_age_cutoff(value: str | None) -> str | None:
-    """Convert "30d" / "12h" / ISO date into an ISO cutoff for cache queries."""
-    if value is None:
-        return None
-    m = re.fullmatch(r"(\d+)([dh])", value)
-    if m:
-        n = int(m.group(1))
-        unit = m.group(2)
-        delta = timedelta(days=n) if unit == "d" else timedelta(hours=n)
-        dt = datetime.now(UTC) - delta
-    else:
-        try:
-            dt = datetime.fromisoformat(value).replace(tzinfo=UTC)
-        except ValueError as exc:
-            raise SystemExit(f"Invalid --older-than value: {value!r}") from exc
-    return dt.isoformat()
-
-
-def _write_json_file(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
 
 
 def _load_plan(path: Path) -> dict:
@@ -95,11 +44,6 @@ def _load_plan(path: Path) -> dict:
     return plan
 
 
-def _default_plan_path(prefix: str) -> Path:
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return cache.DB_DIR / "plans" / f"{prefix}-{stamp}.json"
-
-
 def _backup_message(imap, *, folder: str, uid: int, backup_root: Path) -> Path:
     msg = imap.fetch_body(uid)
     folder_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", folder).strip("_") or "folder"
@@ -110,7 +54,7 @@ def _backup_message(imap, *, folder: str, uid: int, backup_root: Path) -> Path:
 
 def _sync_folder_metadata(*, folder: str, since: str | None = None) -> int:
     creds = auth.load_credentials()
-    criteria = f'SINCE {since}' if since else "ALL"
+    criteria = f"SINCE {since}" if since else "ALL"
 
     with open_session(creds.email, creds.password) as imap:
         total = imap.select(folder, readonly=True)
@@ -145,12 +89,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
+    from rich.table import Table
+
     creds = auth.load_credentials()
     with open_session(creds.email, creds.password) as imap:
         folders = imap.list_folders()
         rows = []
         for f in folders:
-            # Skip non-selectable parent folders
             if r"\Noselect" in f.flags:
                 continue
             try:
@@ -177,13 +122,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    folder = args.folder
-    since = _parse_since(args.since)
-    _sync_folder_metadata(folder=folder, since=since)
+    _sync_folder_metadata(folder=args.folder, since=parse_since(args.since))
     return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
+    from rich.table import Table
+
     with cache.connect() as conn:
         rows = cache.list_messages(conn, args.folder, limit=args.limit)
 
@@ -205,13 +150,15 @@ def cmd_list(args: argparse.Namespace) -> int:
             date_short,
             sender[:30],
             (r["subject"] or "")[:60],
-            _human_size(r["size"] or 0),
+            human_size(r["size"] or 0),
         )
     console.print(table)
     return 0
 
 
 def cmd_senders(args: argparse.Namespace) -> int:
+    from rich.table import Table
+
     with cache.connect() as conn:
         rows = cache.top_senders(conn, args.folder, limit=args.top)
 
@@ -231,7 +178,7 @@ def cmd_senders(args: argparse.Namespace) -> int:
         table.add_row(
             str(i),
             str(r["n"]),
-            _human_size(r["total_bytes"] or 0),
+            human_size(r["total_bytes"] or 0),
             f"{sender} <{r['sender_email']}>"[:60],
             (r["latest"] or "")[:10],
         )
@@ -245,25 +192,8 @@ def cmd_peek(args: argparse.Namespace) -> int:
         imap.select(args.folder, readonly=True)
         msg = imap.fetch_body(args.uid)
 
+    body_text = _plain_body(msg)
     if args.json:
-        # Extract plain-text body if present
-        body_text = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body_text = payload.decode(
-                            part.get_content_charset() or "utf-8",
-                            errors="replace",
-                        )
-                        break
-        else:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                body_text = payload.decode(
-                    msg.get_content_charset() or "utf-8", errors="replace"
-                )
         out = {
             "from": msg.get("From"),
             "to": msg.get("To"),
@@ -281,30 +211,32 @@ def cmd_peek(args: argparse.Namespace) -> int:
     console.print(f"[bold]Date:[/bold]    {msg.get('Date')}")
     console.print(f"[bold]Subject:[/bold] {msg.get('Subject')}")
     console.rule()
+    console.print(body_text[: args.max_body_chars])
+    if len(body_text) > args.max_body_chars:
+        console.print("[dim]... (truncated)[/dim]")
+    return 0
+
+
+def _plain_body(msg) -> str:
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_type() == "text/plain":
                 payload = part.get_payload(decode=True)
                 if payload:
-                    text = payload.decode(
+                    return payload.decode(
                         part.get_content_charset() or "utf-8", errors="replace"
                     )
-                    console.print(text[: args.max_body_chars])
-                    if len(text) > args.max_body_chars:
-                        console.print("[dim]... (truncated)[/dim]")
-                    break
-    else:
-        payload = msg.get_payload(decode=True)
-        if payload:
-            text = payload.decode(
-                msg.get_content_charset() or "utf-8", errors="replace"
-            )
-            console.print(text[: args.max_body_chars])
-    return 0
+        return ""
+    payload = msg.get_payload(decode=True)
+    if payload:
+        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+    return ""
 
 
 def cmd_triage(args: argparse.Namespace) -> int:
-    older_than_iso = _parse_age_cutoff(args.older_than)
+    from rich.table import Table
+
+    older_than_iso = parse_age_cutoff(args.older_than)
     with cache.connect() as conn:
         rows = cache.find_messages(
             conn,
@@ -320,8 +252,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
     action = "delete" if args.delete else "move"
     plan = {
         "version": 1,
-        "created_at": cache.now_utc_iso(),
-        "source": "mail-agent triage",
+        "created_at": now_utc_iso(),
+        "source": "icloud-agent mail triage",
         "folder": args.folder,
         "action": action,
         "destination": args.move_to if action == "move" else None,
@@ -337,7 +269,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
     }
 
     if args.plan_file:
-        _write_json_file(Path(args.plan_file), plan)
+        write_json_file(Path(args.plan_file), plan)
         console.print(f"[green]Wrote dry-run plan:[/green] {args.plan_file}")
 
     if args.json:
@@ -363,12 +295,14 @@ def cmd_triage(args: argparse.Namespace) -> int:
     console.print(table)
     console.print(
         f"[yellow]Dry-run only.[/yellow] Review {len(rows)} message(s), then run "
-        "`mail-agent apply <plan.json> --apply` to mutate iCloud Mail."
+        "`icloud-agent mail apply <plan.json> --apply` to mutate iCloud Mail."
     )
     return 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime
+
     plan_path = Path(args.plan_file)
     plan = _load_plan(plan_path)
     messages = plan["messages"]
@@ -417,6 +351,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 
 def cmd_cleanup_strict(args: argparse.Namespace) -> int:
+    from rich.table import Table
+
     if args.sync:
         _sync_folder_metadata(folder=args.folder, since=None)
 
@@ -426,8 +362,8 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
 
     plan = {
         "version": 1,
-        "created_at": cache.now_utc_iso(),
-        "source": "mail-agent cleanup strict",
+        "created_at": now_utc_iso(),
+        "source": "icloud-agent mail cleanup strict",
         "folder": args.folder,
         "action": "delete",
         "destination": None,
@@ -441,9 +377,9 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
     plan_path = (
         Path(args.plan_file)
         if args.plan_file
-        else _default_plan_path("delete-strict-bulk-inbox")
+        else default_plan_path("delete-strict-bulk-inbox")
     )
-    _write_json_file(plan_path, plan)
+    write_json_file(plan_path, plan)
 
     table = Table(title=f"Strict cleanup plan for {args.folder}")
     table.add_column("Count", justify="right")
@@ -471,8 +407,10 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
 
 
 def cmd_jobs_collect(args: argparse.Namespace) -> int:
+    from rich.table import Table
+
     creds = auth.load_credentials()
-    since = _parse_since(args.since)
+    since = parse_since(args.since)
     criteria = f"SINCE {since}" if since else "ALL"
     leads = []
     scanned = 0
@@ -506,8 +444,8 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
     plan = {
         "version": 1,
         "kind": "job-leads",
-        "created_at": cache.now_utc_iso(),
-        "source": "mail-agent jobs collect",
+        "created_at": now_utc_iso(),
+        "source": "icloud-agent mail jobs collect",
         "folder": args.folder,
         "filters": {
             "since": args.since,
@@ -528,7 +466,7 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
     }
 
     if args.out:
-        _write_json_file(Path(args.out), plan)
+        write_json_file(Path(args.out), plan)
         console.print(f"[green]Wrote job lead plan:[/green] {args.out}")
 
     if args.json:
@@ -554,16 +492,11 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---- argparse setup ----------------------------------------------------
+# ---- argparse registration ---------------------------------------------
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="mail-agent",
-        description="CRUD layer for iCloud Mail with dry-run triage and gated apply.",
-    )
-    sub = p.add_subparsers(dest="cmd", required=True)
-
+def register(sub: argparse._SubParsersAction) -> None:
+    """Mount the mail commands onto a subparsers object."""
     sp = sub.add_parser("setup", help="Store iCloud app-specific password in Keychain.")
     sp.add_argument("--email", required=True, help="Your iCloud email address")
     sp.set_defaults(func=cmd_setup)
@@ -612,13 +545,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_triage)
 
     sp = sub.add_parser("apply", help="Apply a reviewed triage plan. Requires --apply.")
-    sp.add_argument("plan_file", help="JSON plan produced by `mail-agent triage`")
+    sp.add_argument("plan_file", help="JSON plan produced by `triage`")
     sp.add_argument("--apply", action="store_true", help="Actually mutate iCloud Mail")
     sp.set_defaults(func=cmd_apply)
 
     sp = sub.add_parser("cleanup", help="Automated cleanup workflows.")
     cleanup_sub = sp.add_subparsers(dest="cleanup_cmd", required=True)
-
     strict = cleanup_sub.add_parser(
         "strict",
         help="Sync all INBOX metadata and plan/delete known bulk senders.",
@@ -636,7 +568,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("jobs", help="Collect and score job-alert leads.")
     job_sub = sp.add_subparsers(dest="jobs_cmd", required=True)
-
     collect = job_sub.add_parser("collect", help="Extract scored job leads from email alerts.")
     collect.add_argument("--folder", default="INBOX")
     collect.add_argument("--since", default="7d", help="e.g. '7d', '24h', or '2025-01-01'")
@@ -647,21 +578,5 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--json", action="store_true")
     collect.set_defaults(func=cmd_jobs_collect)
 
-    return p
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    try:
-        return args.func(args)
-    except auth.AuthError as e:
-        console.print(f"[red]Auth error:[/red] {e}")
-        return 2
-    except KeyboardInterrupt:
-        console.print("[yellow]Interrupted.[/yellow]")
-        return 130
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+__all__ = ["register"]

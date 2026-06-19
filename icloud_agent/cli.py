@@ -21,6 +21,7 @@ from .drive import commands as drive_commands
 from .mail import commands as mail_commands
 from .messages import commands as messages_commands
 from .notes import commands as notes_commands
+from .photos import commands as photos_commands
 
 DOMAINS = {
     "mail": ("iCloud Mail (IMAP): triage, cleanup, job leads.", mail_commands.register),
@@ -43,6 +44,10 @@ DOMAINS = {
     "drive": (
         "iCloud Drive (filesystem): ls/tree/find/read, gated put/rm.",
         drive_commands.register,
+    ),
+    "photos": (
+        "iCloud Photos: read-only stats/albums/list + best-effort export.",
+        photos_commands.register,
     ),
 }
 

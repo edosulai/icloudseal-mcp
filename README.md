@@ -5,14 +5,14 @@ thinking (classify, summarize, decide); this tool does the hands (fetch, list,
 create, move, delete). Started as `icloud-mail-agent` (mail only); now a
 multi-domain agent.
 
-> **Status — six domains live**
+> **Status — seven domains live**
 > - **Mail (IMAP)** — sync/list/triage plus gated cleanup & job leads.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
 > - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/rm/done.
 > - **Messages / SMS** — read `chat.db` (chats/list/search/export) plus gated AppleScript send.
 > - **Notes (AppleScript)** — list/search/read plus gated create/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
-> - **Photos** — not yet (only remaining domain; see Roadmap).
+> - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
 >
 > Mutating commands are dry-run by default and require `--apply`.
 
@@ -163,6 +163,19 @@ Paths are relative to the iCloud Drive root.
 | `put <local> <dest> [--apply]` | Copy a local file into iCloud Drive |
 | `rm <path> [--apply]` | Move an item to the macOS Trash (never permanent) |
 
+## Photos commands (`icloud-agent photos …`)
+
+Reads need **Full Disk Access**. With iCloud "Optimize Mac Storage", most
+originals are in iCloud and not on disk — `export` copies only those already
+downloaded and reports the rest.
+
+| Command | Action |
+|---|---|
+| `stats [--json]` | Totals: photos / videos / favorites / albums |
+| `albums [--json]` | Albums with item counts |
+| `list [--album … --kind photo\|video --favorites --limit] [--json]` | List assets (newest first) |
+| `export <dir> [--album --kind --favorites] [--apply]` | Copy locally-downloaded originals out |
+
 ## Safety model
 
 - **Dry-run by default.** Destructive ops require explicit `--apply`.
@@ -196,12 +209,14 @@ Three tiers, by how macOS exposes each service:
 | Messages / SMS | local `~/Library/Messages/chat.db` (read) + AppleScript (send) | **Full Disk Access** + Automation |
 | Notes | AppleScript (Notes.app) | Automation |
 | iCloud Drive | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — |
+| Photos | local `Photos.sqlite` catalog (read) | **Full Disk Access** |
 
 ## Roadmap
 
-- **Photos** — the only domain not yet implemented. Path: PhotoKit / the
-  `osxphotos` library, or AppleScript for basic export. Requires the Photos TCC
-  permission. Read/export first; album edits later.
+- **Photos write** — current Photos support is read + best-effort export only.
+  Album edits / imports would need PhotoKit (`osxphotos`) or Photos.app
+  automation; deferred because automation blocks on TCC and originals are
+  iCloud-offloaded.
 - **Scheduled cleanup** — optional LaunchAgent for recurring `mail cleanup strict`.
 
 ## Why not a unified iCloud API?

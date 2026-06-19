@@ -20,7 +20,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from . import auth, cache, jobs
+from . import auth, cache, cleanup, jobs
 from .imap_client import open_session
 
 console = Console()
@@ -95,12 +95,45 @@ def _load_plan(path: Path) -> dict:
     return plan
 
 
+def _default_plan_path(prefix: str) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    return cache.DB_DIR / "plans" / f"{prefix}-{stamp}.json"
+
+
 def _backup_message(imap, *, folder: str, uid: int, backup_root: Path) -> Path:
     msg = imap.fetch_body(uid)
     folder_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", folder).strip("_") or "folder"
     out = backup_root / f"{folder_slug}-{uid}.eml"
     out.write_bytes(msg.as_bytes())
     return out
+
+
+def _sync_folder_metadata(*, folder: str, since: str | None = None) -> int:
+    creds = auth.load_credentials()
+    criteria = f'SINCE {since}' if since else "ALL"
+
+    with open_session(creds.email, creds.password) as imap:
+        total = imap.select(folder, readonly=True)
+        console.print(f"[dim]Selected {folder!r} (server reports {total} messages)[/dim]")
+        uids = imap.search_uids(criteria)
+        console.print(f"Found {len(uids)} message(s) matching {criteria!r}")
+        if not uids:
+            return 0
+
+        with cache.connect() as conn:
+            written = 0
+            buffer: list = []
+            for meta in imap.fetch_metadata(uids):
+                buffer.append(meta)
+                if len(buffer) >= 100:
+                    written += cache.upsert_messages(conn, buffer)
+                    buffer.clear()
+                    console.print(f"[dim]  ...cached {written}[/dim]")
+            if buffer:
+                written += cache.upsert_messages(conn, buffer)
+            cache.update_sync_state(conn, folder, max(uids), total)
+            console.print(f"[green]Synced {written} message(s) into local cache.[/green]")
+            return written
 
 
 # ---- commands ----------------------------------------------------------
@@ -144,32 +177,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
-    creds = auth.load_credentials()
     folder = args.folder
     since = _parse_since(args.since)
-    criteria = f'SINCE {since}' if since else "ALL"
-
-    with open_session(creds.email, creds.password) as imap:
-        total = imap.select(folder, readonly=True)
-        console.print(f"[dim]Selected {folder!r} (server reports {total} messages)[/dim]")
-        uids = imap.search_uids(criteria)
-        console.print(f"Found {len(uids)} message(s) matching {criteria!r}")
-        if not uids:
-            return 0
-
-        with cache.connect() as conn:
-            written = 0
-            buffer: list = []
-            for meta in imap.fetch_metadata(uids):
-                buffer.append(meta)
-                if len(buffer) >= 100:
-                    written += cache.upsert_messages(conn, buffer)
-                    buffer.clear()
-                    console.print(f"[dim]  ...cached {written}[/dim]")
-            if buffer:
-                written += cache.upsert_messages(conn, buffer)
-            cache.update_sync_state(conn, folder, max(uids), total)
-            console.print(f"[green]Synced {written} message(s) into local cache.[/green]")
+    _sync_folder_metadata(folder=folder, since=since)
     return 0
 
 
@@ -406,6 +416,60 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cleanup_strict(args: argparse.Namespace) -> int:
+    if args.sync:
+        _sync_folder_metadata(folder=args.folder, since=None)
+
+    with cache.connect() as conn:
+        messages = [dict(r) for r in cleanup.strict_bulk_messages(conn, folder=args.folder)]
+        summaries = cleanup.strict_sender_summary(conn, folder=args.folder)
+
+    plan = {
+        "version": 1,
+        "created_at": cache.now_utc_iso(),
+        "source": "mail-agent cleanup strict",
+        "folder": args.folder,
+        "action": "delete",
+        "destination": None,
+        "filters": {
+            "sender_emails": sorted(cleanup.STRICT_BULK_SENDERS),
+            "policy": cleanup.STRICT_POLICY_NOTE,
+        },
+        "messages": messages,
+    }
+
+    plan_path = (
+        Path(args.plan_file)
+        if args.plan_file
+        else _default_plan_path("delete-strict-bulk-inbox")
+    )
+    _write_json_file(plan_path, plan)
+
+    table = Table(title=f"Strict cleanup plan for {args.folder}")
+    table.add_column("Count", justify="right")
+    table.add_column("Latest", style="cyan")
+    table.add_column("Sender")
+    for summary in summaries:
+        sender = summary.sender_name or summary.sender_email
+        table.add_row(
+            str(summary.count),
+            (summary.latest or "")[:10],
+            f"{sender} <{summary.sender_email}>"[:74],
+        )
+    console.print(table)
+    console.print(f"[green]Wrote plan:[/green] {plan_path}")
+
+    if not args.apply:
+        console.print(
+            f"[yellow]Dry-run.[/yellow] Would delete {len(messages)} strict bulk message(s). "
+            "Add --apply to execute with .eml backups first."
+        )
+        return 0
+
+    apply_args = argparse.Namespace(plan_file=str(plan_path), apply=True)
+    return cmd_apply(apply_args)
+
+
 def cmd_jobs_collect(args: argparse.Namespace) -> int:
     creds = auth.load_credentials()
     since = _parse_since(args.since)
@@ -551,6 +615,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("plan_file", help="JSON plan produced by `mail-agent triage`")
     sp.add_argument("--apply", action="store_true", help="Actually mutate iCloud Mail")
     sp.set_defaults(func=cmd_apply)
+
+    sp = sub.add_parser("cleanup", help="Automated cleanup workflows.")
+    cleanup_sub = sp.add_subparsers(dest="cleanup_cmd", required=True)
+
+    strict = cleanup_sub.add_parser(
+        "strict",
+        help="Sync all INBOX metadata and plan/delete known bulk senders.",
+    )
+    strict.add_argument("--folder", default="INBOX")
+    strict.add_argument(
+        "--no-sync",
+        dest="sync",
+        action="store_false",
+        help="Use the existing cache instead of syncing all folder metadata first.",
+    )
+    strict.add_argument("--plan-file", help="Write the generated plan to this JSON file")
+    strict.add_argument("--apply", action="store_true", help="Actually delete matched mail")
+    strict.set_defaults(func=cmd_cleanup_strict, sync=True)
 
     sp = sub.add_parser("jobs", help="Collect and score job-alert leads.")
     job_sub = sp.add_subparsers(dest="jobs_cmd", required=True)

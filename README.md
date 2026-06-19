@@ -81,6 +81,7 @@ Should print folder list with message counts. If you see them, you're done with 
 | `mail-agent triage ... --delete --plan-file plan.json` | Build a dry-run delete plan from cached metadata |
 | `mail-agent apply plan.json` | Show what would be applied; does not mutate |
 | `mail-agent apply plan.json --apply` | Backup `.eml` files, then move/delete via IMAP |
+| `mail-agent cleanup strict [--apply]` | Full-sync INBOX, then plan/delete known bulk promo and job-alert senders |
 | `mail-agent jobs collect --since 7d --out plans/jobs.json` | Extract and score job leads from job-alert emails; review-only |
 
 `triage` only reads the local cache. `apply` is the only command that mutates iCloud Mail, and it refuses to do so unless `--apply` is present.
@@ -117,6 +118,25 @@ Apply only after approval:
 ```bash
 mail-agent apply plans/newsletters-to-trash.json --apply
 ```
+
+## Strict automatic cleanup
+
+For routine bulk cleanup, use the strict workflow. It syncs the whole INBOX,
+matches only explicit bulk sender addresses, writes a JSON plan, and stays
+dry-run unless `--apply` is present.
+
+```bash
+mail-agent cleanup strict
+```
+
+Delete the matched bulk mail after review:
+
+```bash
+mail-agent cleanup strict --apply
+```
+
+The strict policy intentionally excludes account/security alerts, receipts,
+GitHub notifications, financial transaction mail, and human LinkedIn messages.
 
 ## Job lead workflow
 

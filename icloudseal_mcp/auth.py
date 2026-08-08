@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from .paths import APP_DIR
 
 # Keychain service stays "icloud-mail-agent" so the existing app-specific
-# password keeps working after the project rename. The same credential is used
-# for IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
+# password keeps working after renames (mail-agent → icloud-agent → icloudseal-mcp).
+# The same credential is used for IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
 SERVICE_NAME = "icloud-mail-agent"
 CONFIG_DIR = APP_DIR
 EMAIL_FILE = CONFIG_DIR / "email"
@@ -72,7 +72,7 @@ def load_credentials(email: str | None = None) -> Credentials:
     if email is None:
         if not EMAIL_FILE.exists():
             raise AuthError(
-                "No email registered yet. Run: mail-agent setup --email <you@icloud.com>"
+                "No email registered yet. Run: icloudseal-mcp mail setup --email <you@icloud.com>"
             )
         email = EMAIL_FILE.read_text().strip()
 
@@ -87,7 +87,7 @@ def load_credentials(email: str | None = None) -> Credentials:
     if result.returncode != 0:
         raise AuthError(
             f"No keychain item for {email!r}. "
-            f"Run: mail-agent setup --email {email}"
+            f"Run: icloudseal-mcp mail setup --email {email}"
         )
     password = result.stdout.strip()
     if not password:

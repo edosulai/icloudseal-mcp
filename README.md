@@ -1,9 +1,12 @@
-# icloud-agent
+# icloudseal-mcp
 
-CRUD layer for **iCloud services** — driven by an AI agent. The agent does the
-thinking (classify, summarize, decide); this tool does the hands (fetch, list,
-create, move, delete). Started as `icloud-mail-agent` (mail only); now a
-multi-domain agent.
+**Sealed iCloud access** for AI agents — local CLI today, MCP + Touch ID approval
+next. Part of the seal family with `whatseal-mcp` (WhatsApp) and `instaseal-mcp`
+(Instagram).
+
+The agent does the thinking (classify, summarize, decide); this tool does the
+hands (fetch, list, create, move, delete). Started as `icloud-mail-agent` (mail
+only) → `icloud-agent` → **`icloudseal-mcp`**.
 
 > **Status — seven domains live**
 > - **Mail (IMAP)** — sync/list/triage plus gated cleanup & job leads.
@@ -16,14 +19,29 @@ multi-domain agent.
 >
 > Mutating commands are dry-run by default and require `--apply`.
 
+## Seal family & security model
+
+| Project | Domain | Approval |
+|---|---|---|
+| `whatseal-mcp` | WhatsApp | Touch ID for every externally visible action |
+| `instaseal-mcp` | Instagram | Touch ID for every externally visible action |
+| **`icloudseal-mcp`** | iCloud (Mail/Contacts/Calendar/Messages/Notes/Drive/Photos) | **CLI gated with `--apply` today; MCP + native Touch ID planned** |
+
+Principles:
+- Data stays on this Mac except what enters the active agent/model context.
+- Mutating CLI commands are dry-run by default and require `--apply`.
+- MCP surface (stdio) is the next layer; sensitive reads/writes should use the
+  same two-phase prepare → native macOS authentication pattern as the other seal tools.
+- On-disk app support dir + Keychain service remain `icloud-mail-agent` for credential continuity.
+
 ## Two CLIs, one command set
 
 | Command | Scope |
 |---|---|
-| `icloud-agent <domain> <action>` | Multi-domain entry point (`mail`, `contacts`, …) |
-| `mail-agent <action>` | Legacy alias = `icloud-agent mail <action>` (kept for back-compat) |
+| `icloudseal-mcp <domain> <action>` | Multi-domain entry point (`mail`, `contacts`, …) |
+| `mail-agent <action>` | Legacy alias = `icloudseal-mcp mail <action>` (kept for back-compat) |
 
-So `mail-agent list` and `icloud-agent mail list` are identical.
+So `mail-agent list` and `icloudseal-mcp mail list` are identical.
 
 ## Architecture
 
@@ -35,9 +53,9 @@ So `mail-agent list` and `icloud-agent mail list` are identical.
                            │ shell
                            ▼
         ┌──────────────────────────────────────────┐
-        │  icloud_agent/                            │
+        │  icloudseal_mcp/                            │
         │   auth/paths/common   shared infra        │
-        │   cli.py     icloud-agent / mail-agent    │
+        │   cli.py     icloudseal-mcp / mail-agent    │
         │   dav/       shared CardDAV/CalDAV client  │
         │   mail/      IMAP        contacts/ CardDAV │
         │   calendar/  CalDAV      messages/ chat.db │
@@ -55,7 +73,7 @@ Keychain (service `icloud-mail-agent`) authenticates IMAP **and** CardDAV/CalDAV
 
 ## Why the storage name stays `icloud-mail-agent`
 
-The project was renamed `icloud-mail-agent` → `icloud-agent`, but the on-disk
+The project was renamed `icloud-mail-agent` → `icloudseal-mcp`, but the on-disk
 directory `~/Library/Application Support/icloud-mail-agent/` and the Keychain
 service name `icloud-mail-agent` are intentionally **unchanged**, so the existing
 app-specific password, metadata cache, and historical backups keep working.
@@ -69,7 +87,7 @@ Passwords** (format `xxxx-xxxx-xxxx-xxxx`).
 
 ### 2. Install
 ```bash
-cd /Users/Shared/Development/tools/icloud-agent
+cd /Users/Shared/Development/tools/icloudseal-mcp
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -77,16 +95,16 @@ pip install -e .
 
 ### 3. Store credentials
 ```bash
-icloud-agent mail setup --email you@icloud.com   # or: mail-agent setup --email ...
+icloudseal-mcp mail setup --email you@icloud.com   # or: mail-agent setup --email ...
 ```
 
 ### 4. Verify
 ```bash
-icloud-agent mail stats          # lists mail folders + counts (IMAP)
-icloud-agent contacts list --limit 5   # lists contacts (CardDAV)
+icloudseal-mcp mail stats          # lists mail folders + counts (IMAP)
+icloudseal-mcp contacts list --limit 5   # lists contacts (CardDAV)
 ```
 
-## Mail commands (`icloud-agent mail …` / `mail-agent …`)
+## Mail commands (`icloudseal-mcp mail …` / `mail-agent …`)
 
 | Command | Action |
 |---|---|
@@ -101,7 +119,7 @@ icloud-agent contacts list --limit 5   # lists contacts (CardDAV)
 | `cleanup strict [--apply]` | Full-sync INBOX, plan/delete known bulk senders |
 | `jobs collect --since 7d --out p.json` | Extract & score job leads (review-only) |
 
-## Contacts commands (`icloud-agent contacts …`)
+## Contacts commands (`icloudseal-mcp contacts …`)
 
 | Command | Action |
 |---|---|
@@ -115,7 +133,7 @@ icloud-agent contacts list --limit 5   # lists contacts (CardDAV)
 Write commands print a dry-run preview and do nothing until `--apply` is added.
 `update`/`delete` back up the affected vCards to `backups/` first.
 
-## Calendar + Reminders commands (`icloud-agent calendar …`)
+## Calendar + Reminders commands (`icloudseal-mcp calendar …`)
 
 | Command | Action |
 |---|---|
@@ -130,7 +148,7 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 
 Dates: `YYYY-MM-DD` (all-day) or `YYYY-MM-DD HH:MM` (timed).
 
-## Messages commands (`icloud-agent messages …`)
+## Messages commands (`icloudseal-mcp messages …`)
 
 Reads need **Full Disk Access** on the running terminal/app.
 
@@ -144,7 +162,7 @@ Reads need **Full Disk Access** on the running terminal/app.
 
 Sending is driven through Messages.app via AppleScript; SMS only works with iPhone Text Message Forwarding enabled.
 
-## Notes commands (`icloud-agent notes …`)
+## Notes commands (`icloudseal-mcp notes …`)
 
 | Command | Action |
 |---|---|
@@ -152,7 +170,7 @@ Sending is driven through Messages.app via AppleScript; SMS only works with iPho
 | `create --title … [--body …] [--apply]` | Create a note |
 | `delete <q> [--apply]` | Delete a note (body backed up to `backups/`) |
 
-## iCloud Drive commands (`icloud-agent drive …`)
+## iCloud Drive commands (`icloudseal-mcp drive …`)
 
 Paths are relative to the iCloud Drive root.
 
@@ -163,7 +181,7 @@ Paths are relative to the iCloud Drive root.
 | `put <local> <dest> [--apply]` | Copy a local file into iCloud Drive |
 | `rm <path> [--apply]` | Move an item to the macOS Trash (never permanent) |
 
-## Photos commands (`icloud-agent photos …`)
+## Photos commands (`icloudseal-mcp photos …`)
 
 Reads need **Full Disk Access**. With iCloud "Optimize Mac Storage", most
 originals are in iCloud and not on disk — `export` copies only those already

@@ -1,11 +1,11 @@
-"""Shared on-disk locations for icloud-agent.
+"""Shared on-disk locations for icloudseal-mcp.
 
 NOTE: the storage directory and Keychain service name intentionally remain
-``icloud-mail-agent`` even though the project was renamed to ``icloud-agent``.
-The iCloud app-specific password, the metadata cache, and historical backups
-were created under that identifier; keeping it avoids losing credentials and
-history during the rename. New domains (contacts, calendar, ...) share the same
-directory.
+``icloud-mail-agent`` even though the project is now ``icloudseal-mcp``.
+The iCloud app-specific password, metadata cache, and historical backups were
+created under that identifier; keeping it avoids losing credentials/history.
+New domains (contacts, calendar, messages, notes, drive, photos) share the same
+directory. MCP/Touch ID sealing does not change this on-disk identity.
 """
 
 from __future__ import annotations

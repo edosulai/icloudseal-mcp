@@ -145,7 +145,7 @@ def build_event(
 ) -> str:
     sp, sv = _ical_dt(start, all_day=all_day)
     lines = [
-        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloud-agent//EN",
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloudseal-mcp//EN",
         "BEGIN:VEVENT", f"UID:{uid}", f"DTSTAMP:{_now_stamp()}",
         f"DTSTART{sp}:{sv}", f"SUMMARY:{summary}",
     ]
@@ -162,7 +162,7 @@ def build_reminder(
     *, uid: str, summary: str, due: str | None = None, completed: bool = False,
 ) -> str:
     lines = [
-        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloud-agent//EN",
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloudseal-mcp//EN",
         "BEGIN:VTODO", f"UID:{uid}", f"DTSTAMP:{_now_stamp()}", f"SUMMARY:{summary}",
     ]
     if due:

@@ -4,7 +4,7 @@ Read commands gather context; mutating commands go through a dry-run plan and a
 gated ``--apply`` that backs up every message as ``.eml`` before deletion.
 
 ``register(subparsers)`` mounts these as subcommands so both the top-level
-``icloud-agent mail ...`` CLI and the legacy ``mail-agent ...`` CLI can reuse
+``icloudseal-mcp mail ...`` CLI and the legacy ``mail-agent ...`` CLI can reuse
 the exact same command set.
 """
 
@@ -253,7 +253,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
     plan = {
         "version": 1,
         "created_at": now_utc_iso(),
-        "source": "icloud-agent mail triage",
+        "source": "icloudseal-mcp mail triage",
         "folder": args.folder,
         "action": action,
         "destination": args.move_to if action == "move" else None,
@@ -295,14 +295,12 @@ def cmd_triage(args: argparse.Namespace) -> int:
     console.print(table)
     console.print(
         f"[yellow]Dry-run only.[/yellow] Review {len(rows)} message(s), then run "
-        "`icloud-agent mail apply <plan.json> --apply` to mutate iCloud Mail."
+        "`icloudseal-mcp mail apply <plan.json> --apply` to mutate iCloud Mail."
     )
     return 0
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    from datetime import UTC, datetime
-
     plan_path = Path(args.plan_file)
     plan = _load_plan(plan_path)
     messages = plan["messages"]
@@ -326,27 +324,30 @@ def cmd_apply(args: argparse.Namespace) -> int:
         raise SystemExit("Move plan is missing destination.")
 
     creds = auth.load_credentials()
-    backup_root = BACKUP_DIR / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    backup_root.mkdir(parents=True, exist_ok=False)
 
     with open_session(creds.email, creds.password) as imap:
         imap.select(folder, readonly=False)
-        for index, uid in enumerate(uids, 1):
-            path = _backup_message(imap, folder=folder, uid=uid, backup_root=backup_root)
-            console.print(f"[dim][{index}/{len(uids)}] backed up UID {uid} -> {path}[/dim]")
         if action == "move":
             imap.move(uids, dest)
         else:
-            imap.mark_deleted(uids)
-            imap.expunge()
+            # "delete" now means move to Trash (Deleted Messages) — no local
+            # .eml backup, no permanent expunge. iCloud keeps messages in Trash
+            # for ~30 days before auto-purging.
+            imap.move(uids, "Deleted Messages")
 
     with cache.connect() as conn:
         removed = cache.remove_cached_messages(conn, folder=folder, uids=uids)
 
-    console.print(
-        f"[green]Applied {action} to {len(uids)} message(s).[/green] "
-        f"Backup: {backup_root}. Cache rows removed: {removed}."
-    )
+    if action == "move":
+        console.print(
+            f"[green]Moved {len(uids)} message(s) to {dest!r}.[/green] "
+            f"Cache rows removed: {removed}."
+        )
+    else:
+        console.print(
+            f"[green]Moved {len(uids)} message(s) to Trash (Deleted Messages).[/green] "
+            f"No local backup created. Cache rows removed: {removed}."
+        )
     return 0
 
 
@@ -363,10 +364,10 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
     plan = {
         "version": 1,
         "created_at": now_utc_iso(),
-        "source": "icloud-agent mail cleanup strict",
+        "source": "icloudseal-mcp mail cleanup strict",
         "folder": args.folder,
-        "action": "delete",
-        "destination": None,
+        "action": "move",
+        "destination": "Deleted Messages",
         "filters": {
             "sender_emails": sorted(cleanup.STRICT_BULK_SENDERS),
             "policy": cleanup.STRICT_POLICY_NOTE,
@@ -377,7 +378,7 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
     plan_path = (
         Path(args.plan_file)
         if args.plan_file
-        else default_plan_path("delete-strict-bulk-inbox")
+        else default_plan_path("trash-strict-bulk-inbox")
     )
     write_json_file(plan_path, plan)
 
@@ -397,8 +398,9 @@ def cmd_cleanup_strict(args: argparse.Namespace) -> int:
 
     if not args.apply:
         console.print(
-            f"[yellow]Dry-run.[/yellow] Would delete {len(messages)} strict bulk message(s). "
-            "Add --apply to execute with .eml backups first."
+            f"[yellow]Dry-run.[/yellow] Would move {len(messages)} strict bulk message(s) "
+            "to Trash (Deleted Messages). Add --apply to execute. No local backup is made "
+            "— iCloud Trash retains messages for ~30 days before auto-purge."
         )
         return 0
 
@@ -445,7 +447,7 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
         "version": 1,
         "kind": "job-leads",
         "created_at": now_utc_iso(),
-        "source": "icloud-agent mail jobs collect",
+        "source": "icloudseal-mcp mail jobs collect",
         "folder": args.folder,
         "filters": {
             "since": args.since,
@@ -553,7 +555,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     cleanup_sub = sp.add_subparsers(dest="cleanup_cmd", required=True)
     strict = cleanup_sub.add_parser(
         "strict",
-        help="Sync all INBOX metadata and plan/delete known bulk senders.",
+        help="Sync all INBOX metadata and move known bulk senders to Trash.",
     )
     strict.add_argument("--folder", default="INBOX")
     strict.add_argument(
@@ -563,7 +565,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Use the existing cache instead of syncing all folder metadata first.",
     )
     strict.add_argument("--plan-file", help="Write the generated plan to this JSON file")
-    strict.add_argument("--apply", action="store_true", help="Actually delete matched mail")
+    strict.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually move matched mail to Trash (Deleted Messages). No local backup.",
+    )
     strict.set_defaults(func=cmd_cleanup_strict, sync=True)
 
     sp = sub.add_parser("jobs", help="Collect and score job-alert leads.")

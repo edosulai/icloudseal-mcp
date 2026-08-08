@@ -56,7 +56,7 @@ class DavClient:
         self._timeout = timeout
         self._session = requests.Session()
         self._session.auth = (email, password)
-        self._session.headers.update({"User-Agent": "icloud-agent/0.2"})
+        self._session.headers.update({"User-Agent": "icloudseal-mcp/0.2"})
 
     # ---- low-level ----------------------------------------------------
 

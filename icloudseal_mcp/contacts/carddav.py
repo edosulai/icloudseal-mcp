@@ -1,6 +1,6 @@
 """High-level iCloud Contacts access over CardDAV.
 
-Wraps :class:`icloud_agent.dav.client.DavClient` with contact discovery, a
+Wraps :class:`icloudseal_mcp.dav.client.DavClient` with contact discovery, a
 small vCard parser/builder for the fields we expose (name, emails, phones,
 org), and CRUD primitives. Destructive operations are exposed but the CLI gates
 them behind a dry-run plan + ``--apply``.
@@ -66,7 +66,10 @@ def _split_prop(line: str) -> tuple[str, str]:
 
 
 def _prop_name(name_with_params: str) -> str:
-    return name_with_params.split(";", 1)[0].upper()
+    # Drop a group prefix like "item1.TEL" / "ITEM1.EMAIL" before params.
+    head = name_with_params.split(";", 1)[0]
+    head = head.split(".", 1)[-1]
+    return head.upper()
 
 
 def parse_vcard(text: str) -> Contact:

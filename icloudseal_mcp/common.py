@@ -1,4 +1,4 @@
-"""Shared CLI helpers used across icloud-agent domains.
+"""Shared CLI helpers used across icloudseal-mcp domains.
 
 Domain-agnostic utilities only: time parsing, human formatting, and JSON plan
 IO. Domain-specific apply/backup logic stays in each domain's module.

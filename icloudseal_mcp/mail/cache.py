@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from ..paths import APP_DIR, DB_PATH, ensure_app_dir
 from .imap_client import MessageMeta
 
-# Backward-compatible alias; canonical location lives in icloud_agent.paths.
+# Backward-compatible alias; canonical location lives in icloudseal_mcp.paths.
 DB_DIR = APP_DIR
 
 SCHEMA = """

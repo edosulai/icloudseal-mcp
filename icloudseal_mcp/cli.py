@@ -1,8 +1,8 @@
-"""Entry points for icloud-agent.
+"""Entry points for icloudseal-mcp.
 
 Two console scripts share one command set:
 
-* ``icloud-agent <domain> <action>`` — the multi-domain CLI
+* ``icloudseal-mcp <domain> <action>`` — the multi-domain CLI
   (``mail``, ``contacts``, and more as domains are added).
 * ``mail-agent <action>`` — legacy alias that maps straight to the mail domain
   so existing muscle memory / scripts keep working.
@@ -54,7 +54,7 @@ DOMAINS = {
 
 def build_icloud_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="icloud-agent",
+        prog="icloudseal-mcp",
         description="Agent-driven CRUD layer for iCloud services (mail, contacts, ...).",
     )
     domain_sub = p.add_subparsers(dest="domain", required=True)
@@ -68,7 +68,7 @@ def build_icloud_parser() -> argparse.ArgumentParser:
 def build_mail_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mail-agent",
-        description="Legacy alias for `icloud-agent mail`. CRUD layer for iCloud Mail.",
+        description="Legacy alias for `icloudseal-mcp mail`. CRUD layer for iCloud Mail.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     mail_commands.register(sub)

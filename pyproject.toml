@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "icloud-agent"
+name = "icloudseal-mcp"
 version = "0.2.0"
-description = "Agent-driven CRUD layer for iCloud services (Mail/IMAP, Contacts/CardDAV, ...). The agent is the brain, this is the hands."
+description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos with gated mutations and planned Touch ID approval."
 requires-python = ">=3.11"
 authors = [{ name = "Edo Sulai" }]
 license = { text = "MIT" }
@@ -21,12 +21,12 @@ dev = [
 ]
 
 [project.scripts]
-icloud-agent = "icloud_agent.cli:main"
-mail-agent = "icloud_agent.cli:mail_main"
+icloudseal-mcp = "icloudseal_mcp.cli:main"
+mail-agent = "icloudseal_mcp.cli:mail_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["icloud_agent*"]
+include = ["icloudseal_mcp*"]
 
 [tool.ruff]
 line-length = 100

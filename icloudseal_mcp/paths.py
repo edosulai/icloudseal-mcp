@@ -1,20 +1,11 @@
-"""Shared on-disk locations for icloudseal-mcp.
-
-NOTE: the storage directory and Keychain service name intentionally remain
-``icloud-mail-agent`` even though the project is now ``icloudseal-mcp``.
-The iCloud app-specific password, metadata cache, and historical backups were
-created under that identifier; keeping it avoids losing credentials/history.
-New domains (contacts, calendar, messages, notes, drive, photos) share the same
-directory. MCP/Touch ID sealing does not change this on-disk identity.
-"""
+"""Shared on-disk locations for icloudseal-mcp."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Kept as "icloud-mail-agent" for backward compatibility (see module docstring).
-APP_DIR = Path.home() / "Library" / "Application Support" / "icloud-mail-agent"
+APP_DIR = Path.home() / "Library" / "Application Support" / "icloudseal-mcp"
 DB_PATH = APP_DIR / "cache.db"
 BACKUP_DIR = APP_DIR / "backups"
 PLANS_DIR = APP_DIR / "plans"

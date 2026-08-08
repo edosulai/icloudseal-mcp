@@ -1,8 +1,8 @@
 """Credential storage via macOS Keychain.
 
 Uses the `security` CLI shipped with macOS. No third-party dependency, no
-plaintext on disk. The app-specific password is stored as an
-internet-password keychain item with service `icloud-mail-agent`.
+plaintext on disk. The app-specific password is stored as a
+generic-password keychain item with service `icloudseal-mcp`.
 """
 
 from __future__ import annotations
@@ -13,10 +13,8 @@ from dataclasses import dataclass
 
 from .paths import APP_DIR
 
-# Keychain service stays "icloud-mail-agent" so the existing app-specific
-# password keeps working after renames (mail-agent → icloud-agent → icloudseal-mcp).
-# The same credential is used for IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
-SERVICE_NAME = "icloud-mail-agent"
+# Same credential authenticates IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
+SERVICE_NAME = "icloudseal-mcp"
 CONFIG_DIR = APP_DIR
 EMAIL_FILE = CONFIG_DIR / "email"
 

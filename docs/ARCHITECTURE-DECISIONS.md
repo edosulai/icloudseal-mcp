@@ -41,11 +41,12 @@ MCP wrapper + `native-approval` path is the planned parity with whatseal/instase
 
 **Not supported:** WhatsApp (use `whatseal-mcp`). Instagram (use `instaseal-mcp`).
 
-## Credential / storage identity (intentionally not renamed)
+## Credential / storage identity
 
-- Keychain service: `icloud-mail-agent`
-- App Support: `~/Library/Application Support/icloud-mail-agent/`
-- Reason: preserve existing app-specific password, cache DB, plans, backups across project renames.
+- Keychain service: `icloudseal-mcp`
+- App Support: `~/Library/Application Support/icloudseal-mcp/`
+- Migrated from legacy `icloud-mail-agent` (mail-agent → icloud-agent → icloudseal-mcp).
+- One-time migration: move App Support tree + re-store Keychain password under the new service name, then delete the old item.
 
 ## Related paths
 

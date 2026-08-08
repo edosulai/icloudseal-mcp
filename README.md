@@ -32,7 +32,7 @@ Principles:
 - Mutating CLI commands are dry-run by default and require `--apply`.
 - MCP surface (stdio) is the next layer; sensitive reads/writes should use the
   same two-phase prepare → native macOS authentication pattern as the other seal tools.
-- On-disk app support dir + Keychain service remain `icloud-mail-agent` for credential continuity.
+- App Support dir + Keychain service: `icloudseal-mcp` (migrated from legacy `icloud-mail-agent`).
 
 ## Two CLIs, one command set
 
@@ -68,15 +68,9 @@ So `mail-agent list` and `icloudseal-mcp mail list` are identical.
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
-Keychain (service `icloud-mail-agent`) authenticates IMAP **and** CardDAV/CalDAV.
+Keychain (service `icloudseal-mcp`) authenticates IMAP **and** CardDAV/CalDAV.
 **No external LLM API** — data stays on this Mac except what enters the chat.
 
-## Why the storage name stays `icloud-mail-agent`
-
-The project was renamed `icloud-mail-agent` → `icloudseal-mcp`, but the on-disk
-directory `~/Library/Application Support/icloud-mail-agent/` and the Keychain
-service name `icloud-mail-agent` are intentionally **unchanged**, so the existing
-app-specific password, metadata cache, and historical backups keep working.
 
 ## Setup (one-time)
 
@@ -210,10 +204,10 @@ downloaded and reports the rest.
 
 ## Data location
 
-- Credentials: macOS Keychain, service `icloud-mail-agent`
-- Cache DB: `~/Library/Application Support/icloud-mail-agent/cache.db`
-- Backups: `~/Library/Application Support/icloud-mail-agent/backups/`
-- Plans: `~/Library/Application Support/icloud-mail-agent/plans/`
+- Credentials: macOS Keychain, service `icloudseal-mcp`
+- Cache DB: `~/Library/Application Support/icloudseal-mcp/cache.db`
+- Backups: `~/Library/Application Support/icloudseal-mcp/backups/`
+- Plans: `~/Library/Application Support/icloudseal-mcp/plans/`
 
 ## Access mechanics per domain
 

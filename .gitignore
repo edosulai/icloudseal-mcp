@@ -2,29 +2,68 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 *.egg-info/
 .venv/
 venv/
+.env/
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+dist/
+build/
+*.egg
 
-# Environment
+# Environment / secrets
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+session.json
+
+# Local overlays — copy from *.example
+scripts/contact_name_rules.json
 
 # Local data (NEVER commit)
 data/
 backups/
+exports/
+plans/
+approvals/
+reports/
 *.db
 *.db-journal
+*.sqlite
+*.sqlite3
 *.eml
 *.mbox
+*.vcf
+
+# Generated / vendor / editor
+graphify-out/
+.claude/
+.codex/
+.agents/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs and temp
+*.log
+tmp/
+temp/
+*.tmp
+*.bak
+*.bak-*
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Editor
-.vscode/
-.idea/
-*.swp

@@ -4,17 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icloudseal-mcp"
-version = "0.2.0"
-description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos with gated mutations and planned Touch ID approval."
+version = "0.3.0"
+description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos with gated mutations and Touch ID approval."
 requires-python = ">=3.11"
 authors = [{ name = "Edo Sulai" }]
 license = { text = "MIT" }
 dependencies = [
     "rich>=13.7",
     "requests>=2.31",
+    "mcp>=2.0,<3",
+    "anyio>=4.0",
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=2.0,<3",
+    "anyio>=4.0",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
@@ -23,6 +29,7 @@ dev = [
 [project.scripts]
 icloudseal-mcp = "icloudseal_mcp.cli:main"
 mail-agent = "icloudseal_mcp.cli:mail_main"
+icloudseal-mcp-server = "icloudseal_mcp.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

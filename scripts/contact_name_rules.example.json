@@ -1,0 +1,29 @@
+{
+  "skip_names": ["keep me", "fake"],
+  "acronyms": ["ACME", "BRI", "DBS"],
+  "outside_wrap": ["ACME", "BRI", "DBS"],
+  "known_tags": ["north campus", "cafe stall"],
+  "special_renames": [
+    {
+      "match_display": "n1",
+      "match_first": "n1",
+      "first": "alex",
+      "middle": "",
+      "last": "",
+      "affil": "ACME",
+      "reason": "rename n1 → alex (ACME)"
+    }
+  ],
+  "broken_parens": [
+    {
+      "displays": ["sam stall)", "sam stall"],
+      "last_contains": "stall)",
+      "middle_contains": "(cafe",
+      "first": "sam",
+      "middle": "",
+      "last": "",
+      "affil": "cafe stall",
+      "reason": "fix broken parentheses sam stall)"
+    }
+  ]
+}

@@ -155,6 +155,22 @@ class ICloudIMAP:
         self._selected = folder
         return int(data[0]) if data and data[0] else 0
 
+    def uidvalidity(self) -> int:
+        """Return UIDVALIDITY for the selected mailbox."""
+        assert self._conn is not None
+        if self._selected is None:
+            raise IMAPError("Must select a folder before reading UIDVALIDITY.")
+        _, values = self._conn.response("UIDVALIDITY")
+        if not values or not values[0]:
+            raise IMAPError("Server did not provide UIDVALIDITY for selected folder.")
+        raw = values[0]
+        if isinstance(raw, bytes):
+            raw = raw.decode("ascii", errors="strict")
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise IMAPError(f"Invalid UIDVALIDITY response: {raw!r}") from exc
+
     def folder_count(self, folder: str) -> int:
         """Get message count for a folder without disturbing current selection."""
         assert self._conn is not None

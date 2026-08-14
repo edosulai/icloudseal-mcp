@@ -7,9 +7,12 @@ IO. Domain-specific apply/backup logic stays in each domain's module.
 from __future__ import annotations
 
 import json
+import os
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
@@ -52,9 +55,21 @@ def human_size(n: int) -> str:
     return f"{size:.1f}TB"
 
 
-def write_json_file(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+def write_json_file(path: Path, payload: Any) -> None:
+    """Atomically write private JSON, avoiding partially-written plans."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        path.chmod(0o600)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def load_json_plan(path: Path) -> dict:

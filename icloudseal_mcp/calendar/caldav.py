@@ -176,6 +176,40 @@ def build_reminder(
     return "\r\n".join(lines) + "\r\n"
 
 
+def complete_reminder(text: str) -> str:
+    """Mark a VTODO complete without erasing recurrence, alarms, or metadata."""
+    stamp = _now_stamp()
+    replacements = {
+        "STATUS": "STATUS:COMPLETED",
+        "COMPLETED": f"COMPLETED:{stamp}",
+        "PERCENT-COMPLETE": "PERCENT-COMPLETE:100",
+    }
+    emitted: set[str] = set()
+    in_todo = False
+    output: list[str] = []
+    for line in _unfold(text):
+        upper = line.strip().upper()
+        if upper == "BEGIN:VTODO":
+            in_todo = True
+            output.append(line)
+            continue
+        if upper == "END:VTODO":
+            for name in ("STATUS", "COMPLETED", "PERCENT-COMPLETE"):
+                if name not in emitted:
+                    output.append(replacements[name])
+            in_todo = False
+            output.append(line)
+            continue
+        name = line.split(":", 1)[0].split(";", 1)[0].upper()
+        if in_todo and name in replacements:
+            if name not in emitted:
+                output.append(replacements[name])
+                emitted.add(name)
+            continue
+        output.append(line)
+    return "\r\n".join(output).rstrip("\r\n") + "\r\n"
+
+
 # ---- session ----------------------------------------------------------
 
 
@@ -280,7 +314,12 @@ class CalendarSession:
 
     def put_item(self, collection_url: str, uid: str, ics: str) -> str:
         href = collection_url.rstrip("/") + f"/{uid}.ics"
-        self._client.put(href, ics, content_type="text/calendar; charset=utf-8")
+        self._client.put(
+            href,
+            ics,
+            content_type="text/calendar; charset=utf-8",
+            if_none_match=True,
+        )
         return href
 
     def delete(self, item: CalItem) -> None:

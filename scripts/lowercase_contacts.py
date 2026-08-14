@@ -231,11 +231,6 @@ def main() -> int:
         return 0
 
     # --- apply ---
-    originals = [
-        # Re-fetch pristine copies for backup (planned contacts now hold new raw).
-        c
-        for c, _, _ in planned
-    ]
     # Backup uses the CURRENT (already-mutated) raw only if we didn't keep the
     # original; to be safe we re-list to grab untouched vCards for the backup.
     console.print("[cyan][backup][/cyan] saving original vCards…")

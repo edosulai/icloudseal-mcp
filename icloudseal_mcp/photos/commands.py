@@ -87,7 +87,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     if assets is None:
         return 2
     dest = Path(args.dest)
-    found = [(a, photosdb.find_local_original(a.filename)) for a in assets]
+    found = [(a, photosdb.find_local_original(a)) for a in assets]
     local = [(a, p) for a, p in found if p]
     remote = [a for a, p in found if not p]
 
@@ -100,8 +100,8 @@ def cmd_export(args: argparse.Namespace) -> int:
                       f"original(s) to {dest}.")
         return 0
     dest.mkdir(parents=True, exist_ok=True)
-    for _a, p in local:
-        (dest / p.name).write_bytes(p.read_bytes())
+    for asset, p in local:
+        (dest / f"{asset.uuid}-{asset.filename}").write_bytes(p.read_bytes())
     console.print(f"[green]Exported {len(local)} original(s) to[/green] {dest}")
     if remote:
         console.print(f"[dim]{len(remote)} not downloaded; open them in Photos.app first.[/dim]")

@@ -93,18 +93,25 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def _applescript_send(to: str, text: str, *, service: str) -> None:
-    svc = "iMessage" if service == "imessage" else "SMS"
-    esc_text = text.replace("\\", "\\\\").replace('"', '\\"')
-    esc_to = to.replace('"', '\\"')
-    script = (
-        'tell application "Messages"\n'
-        f'  set targetService to 1st account whose service type = {svc}\n'
-        f'  set targetBuddy to participant "{esc_to}" of targetService\n'
-        f'  send "{esc_text}" to targetBuddy\n'
-        "end tell"
-    )
+    script = """on run argv
+    set recipient to item 1 of argv
+    set messageText to item 2 of argv
+    set requestedService to item 3 of argv
+    tell application "Messages"
+        if requestedService is "imessage" then
+            set targetService to 1st account whose service type = iMessage
+        else
+            set targetService to 1st account whose service type = SMS
+        end if
+        set targetBuddy to participant recipient of targetService
+        send messageText to targetBuddy
+    end tell
+end run"""
     result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, check=False
+        ["osascript", "-e", script, "--", to, text, service],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "osascript failed")

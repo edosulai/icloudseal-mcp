@@ -1,14 +1,14 @@
 # icloudseal-mcp
 
-**Sealed iCloud access** for AI agents — local CLI today, MCP + Touch ID approval
-next. Part of the seal family with `whatseal-mcp` (WhatsApp) and `instaseal-mcp`
-(Instagram).
+**Sealed iCloud MCP** — local CLI + stdio MCP for AI agents. Part of the seal
+family with `whatseal-mcp` (WhatsApp) and `instaseal-mcp` (Instagram).
 
 The agent does the thinking (classify, summarize, decide); this tool does the
-hands (fetch, list, create, move, delete). Started as `icloud-mail-agent` (mail
-only) → `icloud-agent` → **`icloudseal-mcp`**.
+hands (fetch, list, create, move, delete). Mutations require Touch ID / macOS
+password via the same two-phase prepare → native approval pattern as the other
+seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
-> **Status — seven domains live**
+> **Status — seven domains live (CLI + MCP)**
 > - **Mail (IMAP)** — sync/list/triage plus gated cleanup & job leads.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
 > - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/rm/done.
@@ -17,7 +17,8 @@ only) → `icloud-agent` → **`icloudseal-mcp`**.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
 > - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
 >
-> Mutating commands are dry-run by default and require `--apply`.
+> CLI: mutating commands are dry-run by default and require `--apply`.
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~49 tools).
 
 ## Seal family & security model
 
@@ -25,13 +26,17 @@ only) → `icloud-agent` → **`icloudseal-mcp`**.
 |---|---|---|
 | `whatseal-mcp` | WhatsApp | Touch ID for every externally visible action |
 | `instaseal-mcp` | Instagram | Touch ID for every externally visible action |
-| **`icloudseal-mcp`** | iCloud (Mail/Contacts/Calendar/Messages/Notes/Drive/Photos) | **CLI gated with `--apply` today; MCP + native Touch ID planned** |
+| **`icloudseal-mcp`** | iCloud (Mail/Contacts/Calendar/Messages/Notes/Drive/Photos) | **CLI `--apply`; MCP prepare → native Touch ID** |
 
 Principles:
 - Data stays on this Mac except what enters the active agent/model context.
 - Mutating CLI commands are dry-run by default and require `--apply`.
-- MCP surface (stdio) is the next layer; sensitive reads/writes should use the
-  same two-phase prepare → native macOS authentication pattern as the other seal tools.
+- MCP mutations use prepare → show exact preview → user OK in chat → native
+  macOS authentication (`native-approval.swift`).
+- MCP approval payloads contain immutable resource identities/snapshots rather
+  than mutable search queries or arbitrary plan paths.
+- MCP plans and exports are jailed to owner-only App Support directories; an
+  existing output is never overwritten implicitly.
 - App Support dir + Keychain service: `icloudseal-mcp` (migrated from legacy `icloud-mail-agent`).
 
 ## Two CLIs, one command set
@@ -42,29 +47,67 @@ Principles:
 | `mail-agent <action>` | Legacy alias = `icloudseal-mcp mail <action>` (kept for back-compat) |
 
 So `mail-agent list` and `icloudseal-mcp mail list` are identical.
+MCP setup (VS Code / Copilot / Claude Desktop)
+
+Catalog key: `icloudseal` (dotfiles reconcile). Point the IDE at `mcp-wrapper.sh`:
+
+```json
+{
+  "servers": {
+    "icloudseal": {
+      "type": "stdio",
+      "command": "/absolute/path/to/icloudseal-mcp/mcp-wrapper.sh"
+    }
+  }
+}
+```
+
+The wrapper self-bootstraps `.venv` + editable install if needed, then runs
+`python -m icloudseal_mcp.mcp.server` over stdio.
+
+### Agent workflow
+
+1. First call: `icloud_doctor` or `icloud_status`
+2. Reads: no Touch ID (`icloud_mail_*`, `icloud_contacts_*`, `icloud_messages_*`, …)
+  Local export/plan tools write only to managed App Support directories.
+3. Mutations: `icloud_prepare_*` → show exact preview → user OK → `icloud_request_local_approval`
+4. After timeout: `icloud_action_outcome` (never blind re-prepare)
+
+### MCP tool groups
+
+| Group | Tools |
+|---|---|
+| Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
+| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup |
+| Contacts | list/search/export + prepare create/update/delete |
+| Calendar | list/events/reminders + prepare event/reminder mutations |
+| Messages | chats/list/search/export + prepare send |
+| Notes | list/search/read + prepare create/delete |
+| Drive | ls/tree/find/read + prepare put/rm |
+| Photos | stats/albums/list + prepare export |
+| Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
 ## Architecture
 
 ```
             ┌──────────────────────────────┐
             │  AI agent (chat session)     │
-            │  reads → proposes → asks      │
-            └──────────────┬───────────────┘
-                           │ shell
-                           ▼
+            │  reads → prepare → approve   │
+            └───────┬──────────────┬───────┘
+                    │ MCP stdio    │ shell CLI
+                    ▼              ▼
         ┌──────────────────────────────────────────┐
-        │  icloudseal_mcp/                            │
-        │   auth/paths/common   shared infra        │
-        │   cli.py     icloudseal-mcp / mail-agent    │
-        │   dav/       shared CardDAV/CalDAV client  │
-        │   mail/      IMAP        contacts/ CardDAV │
-        │   calendar/  CalDAV      messages/ chat.db │
-        │   notes/     AppleScript drive/    fs      │
-        └──┬────────┬────────┬────────┬────────┬─────┘
-       IMAP│   DAV  │  CalDAV│  SQLite│ Apple- │ fs
-           ▼        ▼        ▼   +AS  ▼ Script ▼
-   imap.mail   contacts. caldav.  chat.db  Notes.app /
-   .me.com     icloud    icloud   (FDA)    CloudDocs
+        │  icloudseal_mcp/                         │
+        │   mcp/       server + approval + services│
+        │   auth/paths/common   shared infra       │
+        │   cli.py     icloudseal-mcp / mail-agent │
+        │   dav/       shared CardDAV/CalDAV       │
+        │   mail/ IMAP  contacts/ CardDAV          │
+        │   calendar/ CalDAV  messages/ chat.db    │
+        │   notes/ AppleScript  drive/ fs  photos/ │
+        │   native-approval.swift (Touch ID gate)  │
+           └──────────────────────────────────────────┘
+             IMAP/DAV · local DB · AppleScript · CloudDocs
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
@@ -81,7 +124,7 @@ Passwords** (format `xxxx-xxxx-xxxx-xxxx`).
 
 ### 2. Install
 ```bash
-cd /Users/Shared/Development/tools/icloudseal-mcp
+cd /path/to/icloudseal-mcp
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -97,6 +140,11 @@ icloudseal-mcp mail setup --email you@icloud.com   # or: mail-agent setup --emai
 icloudseal-mcp mail stats          # lists mail folders + counts (IMAP)
 icloudseal-mcp contacts list --limit 5   # lists contacts (CardDAV)
 ```
+
+Contact-name cleanup is optional. Copy
+[`scripts/contact_name_rules.example.json`](./scripts/contact_name_rules.example.json)
+to `scripts/contact_name_rules.json` and add local skip names / tags there.
+The live file is gitignored and must not be committed.
 
 ## Mail commands (`icloudseal-mcp mail …` / `mail-agent …`)
 
@@ -191,16 +239,41 @@ downloaded and reports the rest.
 ## Safety model
 
 - **Dry-run by default.** Destructive ops require explicit `--apply`.
-- **Backup before mutation.** Mail → `.eml`, contacts → `.vcf`, calendar → `.ics`,
-  notes → `.txt`, all under `backups/`. Drive `rm` goes to the macOS Trash.
+- **Two independent MCP confirmations.** A mutation requires explicit chat OK
+  after prepare, then native Touch ID/macOS-password authorization.
+- **Immutable execution targets.** Mail plans freeze UIDs, message metadata,
+  `UIDVALIDITY`, and a canonical SHA-256. CardDAV/CalDAV targets freeze exact
+  href + ETag + raw document. Notes freeze ID, modified date, body, and hash.
+  Drive/Photos freeze exact local paths and content hashes.
+- **Backup before DAV/Notes mutation.** Contacts → `.vcf`, calendar → `.ics`,
+  notes → `.txt`, all under owner-only `backups/`. Mail delete means a move to
+  `Deleted Messages` (no local `.eml` backup). Drive `rm` goes to macOS Trash.
 - **ETag-guarded DAV writes.** Contact/calendar updates & deletes use `If-Match`
   so concurrent edits aren't clobbered; creates use `If-None-Match: *`.
+- **Property-preserving updates.** Contact/reminder updates retain unknown
+  vCard/iCalendar properties, recurrence rules, alarms, and attachments.
 - **Read-only Messages DB.** `chat.db` is opened `mode=ro&immutable=1`; the tool
   never writes to it.
-- **Drive sandboxing.** Drive paths are resolved and rejected if they escape the
-  iCloud Drive root.
+- **Filesystem isolation.** Drive paths cannot escape CloudDocs. MCP plan output
+  is jailed to `plans/`; Contacts/Messages/Mail/Photos exports are jailed to
+  `exports/`. Drive overwrite requires `overwrite=true` and an unchanged
+  approved destination.
+- **No AppleScript interpolation.** Notes, Messages, and Finder receive dynamic
+  values through AppleScript `argv`, never executable script source.
+- **Private local state.** State/backup/export directories use mode `0700` and
+  sensitive files use `0600`; approval outcomes are atomically replaced.
 - **One credential, least surprise.** Same Keychain item authenticates IMAP,
   CardDAV, and CalDAV.
+
+### Managed MCP output paths
+
+- `icloud_mail_triage.plan_file`: filename or path under `plans/` only.
+- `icloud_prepare_mail_apply.plan_file`: existing JSON under `plans/` only.
+- Contacts, Messages, and Mail-jobs export paths: files under `exports/` only.
+- `icloud_prepare_photos_export.dest`: a new directory under `exports/` only.
+- Existing plans/exports are rejected rather than overwritten.
+- `icloud_prepare_drive_put` accepts `overwrite=false` by default; set it to
+  `true` only when the exact existing destination shown in preview may be replaced.
 
 ## Data location
 
@@ -208,6 +281,8 @@ downloaded and reports the rest.
 - Cache DB: `~/Library/Application Support/icloudseal-mcp/cache.db`
 - Backups: `~/Library/Application Support/icloudseal-mcp/backups/`
 - Plans: `~/Library/Application Support/icloudseal-mcp/plans/`
+- Exports: `~/Library/Application Support/icloudseal-mcp/exports/`
+- Approval outcomes: `~/Library/Application Support/icloudseal-mcp/approvals/outcomes/`
 
 ## Access mechanics per domain
 

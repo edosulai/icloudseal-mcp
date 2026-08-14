@@ -27,9 +27,12 @@ class Note:
     modified: str
 
 
-def _run(script: str) -> str:
+def _run(script: str, *args: str) -> str:
     result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, check=False
+        ["osascript", "-e", script, "--", *args],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise NotesError(result.stderr.strip() or "osascript failed")
@@ -66,24 +69,31 @@ def list_notes() -> list[Note]:
 
 
 def read_note(note_id: str) -> str:
-    esc = note_id.replace('"', '\\"')
-    body = _run(f'tell application "Notes" to return body of note id "{esc}"')
+    script = """on run argv
+    set noteID to item 1 of argv
+    tell application "Notes" to return body of note id noteID
+end run"""
+    body = _run(script, note_id)
     return strip_html(body)
 
 
 def create_note(title: str, body: str) -> None:
     content = f"{title}\n{body}" if body else title
-    esc = content.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "<br>")
-    script = (
-        'tell application "Notes"\n'
-        '  tell account "iCloud"\n'
-        f'    make new note with properties {{body:"{esc}"}}\n'
-        "  end tell\n"
-        "end tell"
-    )
-    _run(script)
+    content_html = html.escape(content).replace("\n", "<br>")
+    script = """on run argv
+    set noteBody to item 1 of argv
+    tell application "Notes"
+        tell account "iCloud"
+            make new note with properties {body:noteBody}
+        end tell
+    end tell
+end run"""
+    _run(script, content_html)
 
 
 def delete_note(note_id: str) -> None:
-    esc = note_id.replace('"', '\\"')
-    _run(f'tell application "Notes" to delete note id "{esc}"')
+    script = """on run argv
+    set noteID to item 1 of argv
+    tell application "Notes" to delete note id noteID
+end run"""
+    _run(script, note_id)

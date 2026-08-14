@@ -23,7 +23,7 @@ from ..common import (
     parse_since,
     write_json_file,
 )
-from ..paths import BACKUP_DIR, default_plan_path, now_utc_iso
+from ..paths import default_plan_path, now_utc_iso
 from . import cache, cleanup, jobs
 from .imap_client import open_session
 

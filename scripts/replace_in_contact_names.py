@@ -15,14 +15,14 @@ Safety model (mirrors the rest of icloudseal-mcp):
   * verbose 0-100%% progress line per contact
 
 Examples:
-    # dry-run: (steradian) -> (SDO)
-    python scripts/replace_in_contact_names.py "(steradian)" "(SDO)"
+    # dry-run: (oldtag) -> (ACME)
+    python scripts/replace_in_contact_names.py "(oldtag)" "(ACME)"
 
     # actually apply
-    python scripts/replace_in_contact_names.py "(steradian)" "(SDO)" --apply
+    python scripts/replace_in_contact_names.py "(oldtag)" "(ACME)" --apply
 
     # case-sensitive match
-    python scripts/replace_in_contact_names.py "sapo" "SAPO" --case-sensitive
+    python scripts/replace_in_contact_names.py "oldtag" "ACME" --case-sensitive
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from icloudseal_mcp.common import console  # noqa: E402
 from icloudseal_mcp.contacts import carddav  # noqa: E402
 from icloudseal_mcp.contacts.carddav import Contact, ContactsSession  # noqa: E402
 from icloudseal_mcp.paths import BACKUP_DIR, timestamp_slug  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Substring replacement (case-insensitive by default, literal not regex)
@@ -220,7 +219,7 @@ def main() -> int:
         )
 
     planned: list[tuple[Contact, str, str]] = []  # (contact, old_fn, new_fn)
-    for idx, c in enumerate(contacts, 1):
+    for c in contacts:
         raw = c.raw or ""
         new_raw, changed = rewrite_raw_vcard(
             raw,

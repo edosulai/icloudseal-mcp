@@ -37,6 +37,7 @@ class Album:
 @dataclass(frozen=True)
 class Asset:
     uuid: str
+    directory: str
     filename: str
     date_iso: str
     kind: str       # "photo" or "video"
@@ -100,6 +101,7 @@ def list_albums() -> list[Album]:
 def _row_to_asset(r: sqlite3.Row) -> Asset:
     return Asset(
         uuid=r["ZUUID"],
+        directory=r["ZDIRECTORY"] or "",
         filename=r["ZFILENAME"] or "",
         date_iso=_cocoa_to_iso(r["ZDATECREATED"]),
         kind="video" if r["ZKIND"] == 1 else "photo",
@@ -132,7 +134,8 @@ def list_assets(
         params.append(limit)
         rows = con.execute(
             f"""
-            SELECT a.ZUUID, a.ZFILENAME, a.ZDATECREATED, a.ZKIND, a.ZFAVORITE
+                 SELECT a.ZUUID, a.ZDIRECTORY, a.ZFILENAME, a.ZDATECREATED,
+                     a.ZKIND, a.ZFAVORITE
             FROM ZASSET a {join}
             WHERE {" AND ".join(clauses)}
             ORDER BY a.ZDATECREATED DESC
@@ -164,9 +167,12 @@ def stats() -> dict:
     }
 
 
-def find_local_original(filename: str) -> Path | None:
-    """Best-effort: find a downloaded original by filename under originals/."""
-    if not ORIGINALS.exists() or not filename:
+def find_local_original(asset: Asset) -> Path | None:
+    """Resolve one exact downloaded original from its catalog directory and UUID."""
+    if not ORIGINALS.exists() or not asset.directory or not asset.filename:
         return None
-    matches = list(ORIGINALS.rglob(filename))
-    return matches[0] if matches else None
+    root = ORIGINALS.resolve()
+    candidate = (root / asset.directory / asset.filename).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise PhotosAccessError("Photos catalog returned an invalid original path.")
+    return candidate if candidate.is_file() else None

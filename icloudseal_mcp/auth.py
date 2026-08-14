@@ -11,7 +11,7 @@ import getpass
 import subprocess
 from dataclasses import dataclass
 
-from .paths import APP_DIR
+from .paths import APP_DIR, ensure_app_dir
 
 # Same credential authenticates IMAP/SMTP (mail) and CardDAV/CalDAV (contacts/calendar).
 SERVICE_NAME = "icloudseal-mcp"
@@ -42,7 +42,7 @@ def _run_security(args: list[str], *, input_text: str | None = None) -> subproce
 
 def store_credentials(email: str, password: str) -> None:
     """Persist credentials in the macOS Keychain (idempotent: overwrites if exists)."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_app_dir()
 
     # -U updates the item if it already exists; otherwise creates it.
     # -s service, -a account, -w password, -T "" disables app-access prompts (we control it)
@@ -59,7 +59,8 @@ def store_credentials(email: str, password: str) -> None:
     if result.returncode != 0:
         raise AuthError(f"Failed to store credentials: {result.stderr.strip()}")
 
-    EMAIL_FILE.write_text(email + "\n")
+    EMAIL_FILE.write_text(email + "\n", encoding="utf-8")
+    EMAIL_FILE.chmod(0o600)
 
 
 def load_credentials(email: str | None = None) -> Credentials:

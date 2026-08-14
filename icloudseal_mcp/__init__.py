@@ -1,3 +1,7 @@
-"""icloudseal-mcp: sealed local access layer for iCloud services.\n\nCLI + future MCP surface for Mail, Contacts, Calendar, Messages, Notes, Drive, Photos.\nSensitive actions are intended to require native macOS approval (Touch ID).\n"""
+"""icloudseal-mcp: sealed local access layer for iCloud services.
 
-__version__ = "0.2.0"
+CLI + MCP surface for Mail, Contacts, Calendar, Messages, Notes, Drive, Photos.
+Sensitive mutations require native macOS approval (Touch ID / password).
+"""
+
+__version__ = "0.3.0"

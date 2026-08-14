@@ -146,6 +146,45 @@ def build_vcard(
     return "\r\n".join(lines) + "\r\n"
 
 
+def update_vcard(contact: Contact) -> str:
+    """Update exposed fields while preserving every unexposed vCard property."""
+    if not contact.raw:
+        return build_vcard(
+            uid=contact.uid,
+            full_name=contact.full_name,
+            first=contact.first,
+            last=contact.last,
+            org=contact.org,
+            emails=contact.emails,
+            phones=contact.phones,
+        )
+    replacements: dict[str, list[str]] = {
+        "UID": [f"UID:{contact.uid}"],
+        "N": [f"N:{_escape(contact.last)};{_escape(contact.first)};;;"],
+        "FN": [f"FN:{_escape(contact.full_name)}"],
+        "ORG": [f"ORG:{_escape(contact.org)}"] if contact.org else [],
+        "EMAIL": [f"EMAIL;TYPE=INTERNET:{value}" for value in contact.emails],
+        "TEL": [f"TEL;TYPE=CELL:{value}" for value in contact.phones],
+    }
+    emitted: set[str] = set()
+    output: list[str] = []
+    for line in _unfold(contact.raw):
+        head, _ = _split_prop(line)
+        name = _prop_name(head)
+        if name in replacements:
+            if name not in emitted:
+                output.extend(replacements[name])
+                emitted.add(name)
+            continue
+        if name == "END" and "VCARD" in line.upper():
+            for missing in ("UID", "N", "FN", "ORG", "EMAIL", "TEL"):
+                if missing not in emitted:
+                    output.extend(replacements[missing])
+                    emitted.add(missing)
+        output.append(line)
+    return "\r\n".join(output).rstrip("\r\n") + "\r\n"
+
+
 # ---- session ----------------------------------------------------------
 
 
@@ -207,7 +246,7 @@ class ContactsSession:
     def _href_for(self, uid: str) -> str:
         return self.addressbook_url.rstrip("/") + f"/{uid}.vcf"
 
-    def create(self, contact: Contact) -> str:
+    def create(self, contact: Contact, *, addressbook_url: str | None = None) -> str:
         vcard = build_vcard(
             uid=contact.uid,
             full_name=contact.full_name,
@@ -217,22 +256,14 @@ class ContactsSession:
             emails=contact.emails,
             phones=contact.phones,
         )
-        href = self._href_for(contact.uid)
+        href = (addressbook_url or self.addressbook_url).rstrip("/") + f"/{contact.uid}.vcf"
         self._client.put(href, vcard, content_type="text/vcard; charset=utf-8", if_none_match=True)
         return href
 
     def update(self, contact: Contact) -> None:
         if not contact.href:
             raise DavError("Cannot update a contact without an href.")
-        vcard = build_vcard(
-            uid=contact.uid,
-            full_name=contact.full_name,
-            first=contact.first,
-            last=contact.last,
-            org=contact.org,
-            emails=contact.emails,
-            phones=contact.phones,
-        )
+        vcard = update_vcard(contact)
         self._client.put(
             contact.href, vcard, content_type="text/vcard; charset=utf-8", etag=contact.etag
         )

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
 def connect() -> Iterator[sqlite3.Connection]:
     ensure_app_dir()
     conn = sqlite3.connect(DB_PATH)
+    DB_PATH.chmod(0o600)
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(SCHEMA)

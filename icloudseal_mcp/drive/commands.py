@@ -134,9 +134,15 @@ def cmd_rm(args: argparse.Namespace) -> int:
     if not args.apply:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to move it to Trash.")
         return 0
-    script = f'tell application "Finder" to delete (POSIX file "{p}" as alias)'
+    script = """on run argv
+    set targetPath to item 1 of argv
+    tell application "Finder" to delete (POSIX file targetPath as alias)
+end run"""
     result = subprocess.run(
-        ["osascript", "-e", script], capture_output=True, text=True, check=False
+        ["osascript", "-e", script, "--", str(p)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode != 0:
         console.print(f"[red]Trash failed:[/red] {result.stderr.strip()}")

@@ -2,22 +2,26 @@
 """Normalize iCloud contact names for consistency (safe version).
 
 What this DOES change:
-1. Affiliation currently stored in N-last (e.g. ``N:(BRI);bu;tania;;``)
+1. Affiliation currently stored in N-last (e.g. ``N:(ACME);bu;ada;;``)
    → move out of last name, rebuild FN as ``given (AFFIL)``, set ORG.
 2. Outside-paren known acronyms used as company tags
-   (``edi SD``, ``isan SD``, ``toa UPI``, ``DBS laundry``, ``customer care DANA ✅``)
+   (``ada ACME``, ``customer care BRI``)
    → rewrite to ``name (ACRONYM)`` form + ORG.
-3. Broken parentheses ``sekar madura)`` → ``sekar (warung madura)``.
-4. Special rename ``a5`` → ``afif (UPI)``.
+3. Broken parentheses from ``broken_parens`` in the local rules file.
+4. Special renames from ``special_renames`` in the local rules file.
 5. When FN already has ``name (tag)`` but the whole string is stuffed into
-   N-first (``N:;andre (SDO);;;``), split given into First and put tag into ORG
+   N-first (``N:;alex (ACME);;;``), split given into First and put tag into ORG
    (display name stays the same).
 
 What this does NOT change:
-  * Multi-word real names (``edo sulai``, ``yakjuj makjuj``, ``bg dayat``, …)
-  * Protected: ``my life 🤬🤬``, ``fake``
-  * False-positive acronyms that are ordinary Indonesian words in context
+  * Multi-word real names
+  * Names listed in ``skip_names``
+  * False-positive acronyms that are ordinary words in context
     (``si paling`` is NOT rewritten to ``paling (SI)``)
+
+Copy ``scripts/contact_name_rules.example.json`` to
+``scripts/contact_name_rules.json`` for local names, tags, and one-off
+renames. The live file is gitignored.
 
 Also always writes two reports (read-only):
   * empty contacts (no phone + no email)
@@ -44,81 +48,25 @@ from icloudseal_mcp.common import console  # noqa: E402
 from icloudseal_mcp.contacts.carddav import Contact, ContactsSession  # noqa: E402
 from icloudseal_mcp.paths import APP_DIR, BACKUP_DIR, timestamp_slug  # noqa: E402
 
-SKIP_NAMES = frozenset({"my life 🤬🤬", "fake"})
+RULES_PATH = Path(__file__).resolve().parent / "contact_name_rules.json"
+EXAMPLE_RULES_PATH = Path(__file__).resolve().parent / "contact_name_rules.example.json"
 
-# Company / affiliation acronyms. Matched as whole words.
-ACRONYMS = frozenset(
-    {
-        "BRI",
-        "SDO",
-        "IGLO",
-        "IF",
-        "UPI",
-        "IIS",
-        "KP",
-        "SD",
-        "SI",
-        "MP",
-        "KSPS",
-        "UPIYPTK",
-        "SIGMATECH",
-        "FTL",
-        "CISO",
-        "DBS",
-        "DANA",
-    }
-)
 
+def _load_rules() -> dict:
+    path = RULES_PATH if RULES_PATH.is_file() else EXAMPLE_RULES_PATH
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+_RULES = _load_rules()
+SKIP_NAMES = frozenset(_RULES.get("skip_names", ()))
+ACRONYMS = frozenset(_RULES.get("acronyms", ()))
 # Only these may be auto-wrapped when bare outside parentheses.
-# SI is intentionally EXCLUDED here — "si paling" is Indonesian, not SI.
-OUTSIDE_WRAP = frozenset(
-    {
-        "BRI",
-        "SDO",
-        "IGLO",
-        "IF",
-        "UPI",
-        "IIS",
-        "KP",
-        "SD",
-        "MP",
-        "KSPS",
-        "UPIYPTK",
-        "SIGMATECH",
-        "FTL",
-        "CISO",
-        "DBS",
-        "DANA",
-    }
-)
-
+OUTSIDE_WRAP = frozenset(_RULES.get("outside_wrap", ()))
 # Non-acronym affiliation tags we still treat as company context when already
 # parenthesized in FN (do NOT invent these; only extract if already present).
-KNOWN_TAGS = frozenset(
-    {
-        "willman",
-        "ordent",
-        "sapo",
-        "entrust",
-        "ellenzia",
-        "briguna",
-        "macbook",
-        "ragunan",
-        "ambon parkir",
-        "dana syariah",
-        "bonalti kost",
-        "kost nada",
-        "kost mili",
-        "kost andreas",
-        "service ac",
-        "service AC",
-        "arumi motor",
-        "alex",
-        "meng",
-        "imam",
-        "warung madura",
-    }
-)
+KNOWN_TAGS = frozenset(_RULES.get("known_tags", ()))
+SPECIAL_RENAMES = list(_RULES.get("special_renames", ()))
+BROKEN_PARENS = list(_RULES.get("broken_parens", ()))
 
 REPORT_DIR = APP_DIR / "reports"
 
@@ -311,27 +259,43 @@ def plan_contact(c: Contact) -> NamePlan | None:
     w_last, w_first, w_middle = last, first, middle
 
     # ------------------------------------------------------------------
-    # 0) Special rename: a5 → afif (UPI)
+    # 0) Special rename from local rules
     # ------------------------------------------------------------------
-    if display.casefold() == "a5" or (
-        w_first.casefold() == "a5" and not w_last and not w_middle
-    ):
-        w_first, w_middle, w_last = "afif", "", ""
-        affil = "UPI"
-        reasons.append("rename a5 → afif (UPI)")
+    for rule in SPECIAL_RENAMES:
+        match_display = str(rule.get("match_display", "")).casefold()
+        match_first = str(rule.get("match_first", "")).casefold()
+        if display.casefold() == match_display or (
+            match_first
+            and w_first.casefold() == match_first
+            and not w_last
+            and not w_middle
+        ):
+            w_first = str(rule.get("first", ""))
+            w_middle = str(rule.get("middle", ""))
+            w_last = str(rule.get("last", ""))
+            affil = str(rule.get("affil") or "") or None
+            reasons.append(str(rule.get("reason") or "special rename"))
+            break
 
     # ------------------------------------------------------------------
-    # 1) Broken sekar madura)
-    #    Raw N: madura);sekar;(warung
+    # 1) Broken parentheses from local rules
     # ------------------------------------------------------------------
-    if affil is None and (
-        "madura)" in w_last
-        or "(warung" in w_middle
-        or display in ("sekar madura)", "sekar madura")
-    ):
-        w_first, w_middle, w_last = "sekar", "", ""
-        affil = "warung madura"
-        reasons.append("fix broken parentheses sekar madura)")
+    if affil is None:
+        for rule in BROKEN_PARENS:
+            displays = {str(d) for d in rule.get("displays", [])}
+            last_contains = str(rule.get("last_contains") or "")
+            middle_contains = str(rule.get("middle_contains") or "")
+            if (
+                (last_contains and last_contains in w_last)
+                or (middle_contains and middle_contains in w_middle)
+                or display in displays
+            ):
+                w_first = str(rule.get("first", ""))
+                w_middle = str(rule.get("middle", ""))
+                w_last = str(rule.get("last", ""))
+                affil = str(rule.get("affil") or "") or None
+                reasons.append(str(rule.get("reason") or "fix broken parentheses"))
+                break
 
     # ------------------------------------------------------------------
     # 2) Affiliation sitting in N-last: (BRI) / (SDO) / SD / BRI
@@ -533,9 +497,12 @@ def build_reports(contacts: list[Contact], report_dir: Path) -> dict:
         if not phones and not emails:
             note = ""
             if c.full_name in SKIP_NAMES:
-                note = "KEEP — user requested"
-            elif c.full_name == "a5":
-                note = "rename target a5 → afif (UPI)"
+                note = "KEEP — listed in skip_names"
+            else:
+                for rule in SPECIAL_RENAMES:
+                    if c.full_name.casefold() == str(rule.get("match_display", "")).casefold():
+                        note = str(rule.get("reason") or "special rename")
+                        break
             empty.append(
                 {
                     "uid": c.uid,
@@ -556,9 +523,11 @@ def build_reports(contacts: list[Contact], report_dir: Path) -> dict:
         f"Total: **{len(empty)}**",
         "",
         "Protected / special:",
-        "- `my life 🤬🤬` — KEEP (user request)",
-        "- `fake` — KEEP (user request)",
-        "- `a5` — rename to `afif (UPI)` (user request; not deleted)",
+        *[f"- `{name}` — KEEP (skip_names)" for name in sorted(SKIP_NAMES)],
+        *[
+            f"- `{rule.get('match_display')}` — {rule.get('reason') or 'special rename'}"
+            for rule in SPECIAL_RENAMES
+        ],
         "",
         "| # | Name | UID | Note |",
         "|---|------|-----|------|",
@@ -638,12 +607,7 @@ def build_reports(contacts: list[Contact], report_dir: Path) -> dict:
     md.append("")
     md.append("## Recommended merges (manual)")
     md.append("")
-    md.append(
-        "- Phone `089654573424` shared by `desi yo nee` and `eci` — likely same person."
-    )
-    md.append(
-        "- Same-name groups (`erika`, `sonia (UPI)`, `pak (SDO)`) — verify before merge."
-    )
+    md.append("- Review same-phone and same-name groups before merging.")
     dup_md.write_text("\n".join(md) + "\n")
 
     return {

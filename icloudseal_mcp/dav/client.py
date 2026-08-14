@@ -202,7 +202,7 @@ class DavClient:
     def delete(self, url: str, *, etag: str | None = None) -> None:
         headers = {"If-Match": etag} if etag else {}
         resp = self._session.delete(url, headers=headers, timeout=self._timeout)
-        if resp.status_code not in (200, 204, 404):
+        if resp.status_code not in (200, 204):
             raise DavError(f"DELETE {url} -> HTTP {resp.status_code}")
 
 

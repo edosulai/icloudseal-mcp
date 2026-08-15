@@ -9,22 +9,22 @@ password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
 > **Status — thirteen domains live (CLI + MCP)**
-> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), flags, move, trash, and create-folder.
+> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), forward, flags, move, trash, and create-folder.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
-> - **Calendar + Reminders (CalDAV)** — list plus gated add/update/rm/done with ATTENDEE/TZID.
+> - **Calendar + Reminders (CalDAV)** — list/timezones plus gated add/update/rm/done with ATTENDEE/TZID.
 > - **Messages / SMS** — read `chat.db` plus gated AppleScript send (optional file attach).
-> - **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create/update/delete.
+> - **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create (account picker)/update/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated mkdir/put/rm (rm → Trash).
-> - **Photos** — stats/albums/list plus gated export, favorite, and album-add. Import is not implemented.
-> - **Safari (AppleScript)** — tabs/current/page-text plus gated http(s) open, search, and close-tab.
-> - **Music (AppleScript)** — now-playing plus gated playpause/next/previous, volume, shuffle, repeat, play-by-name.
-> - **Weather (Open-Meteo)** — current plus daily forecast; hourly is opt-in.
+> - **Photos** — stats/albums/list plus gated export, favorite, album-add, and album-create. Import is not implemented.
+> - **Safari (AppleScript)** — tabs/current/page-text plus allowlisted title+innerText extract. Gated http(s) open, search, and close-tab.
+> - **Music (AppleScript)** — now-playing plus library search (names only). Gated playpause/next/previous, volume, shuffle, repeat, play-by-name.
+> - **Weather (Open-Meteo)** — current plus daily forecast; hourly and 15-minute rows are opt-in.
 > - **Maps (maps.apple.com)** — local search/directions URL plus gated open (optional zoom/type).
 > - **Health** — status only. Fail-closed until a signed HealthKit helper exists. Does not scrape Health.app.
 > - **Ops** — write a mail-cleanup LaunchAgent plist. Does not `launchctl load`.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~83 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~88 tools).
 
 ## Seal family & security model
 
@@ -84,16 +84,16 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Group | Tools |
 |---|---|
 | Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
-| Mail | stats/sync/list/senders/peek/triage/jobs/attachments + prepare apply/cleanup/send/flags/move/trash/create-folder |
+| Mail | stats/sync/list/senders/peek/triage/jobs/attachments + prepare apply/cleanup/send/forward/flags/move/trash/create-folder |
 | Contacts | list/search/export + prepare create/update/delete |
-| Calendar | list/events/reminders + prepare event add/update/rm and reminder mutations |
+| Calendar | list/events/reminders/timezones + prepare event add/update/rm and reminder mutations |
 | Messages | chats/list/search/export + prepare send (optional attach) |
 | Notes | list/search/read/accounts/folders + prepare create/update/delete |
 | Drive | ls/tree/find/read + prepare mkdir/put/rm |
-| Photos | stats/albums/list + prepare export/favorite/album-add |
-| Safari | tabs/current/page-text + prepare open-url/search/close-tab |
-| Music | now-playing + prepare playpause/next/previous/volume/shuffle/repeat/play |
-| Weather | forecast (Open-Meteo current+daily; hourly opt-in) |
+| Photos | stats/albums/list + prepare export/favorite/album-add/album-create |
+| Safari | tabs/current/page-text/extract + prepare open-url/search/close-tab |
+| Music | now-playing/search + prepare playpause/next/previous/volume/shuffle/repeat/play |
+| Weather | forecast (Open-Meteo current+daily; hourly/minutely opt-in) |
 | Maps | search URL + prepare open (optional zoom/type) |
 | Health | status only (fail-closed) |
 | Ops | prepare cleanup-agent (write plist only) |

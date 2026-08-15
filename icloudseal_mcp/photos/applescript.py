@@ -70,3 +70,17 @@ def add_to_album(filename: str, album: str) -> None:
     end tell
 end run"""
     _run(script, name, album_name)
+
+
+def create_album(album: str) -> None:
+    """Create an empty Photos album by title. Does not import photos."""
+    album_name = _clean_name(album, "album")
+    script = """on run argv
+    set albumName to item 1 of argv
+    tell application "Photos"
+        set theAlbums to (every album whose name is albumName)
+        if (count of theAlbums) is greater than 0 then error "Photos album already exists"
+        make new album named albumName
+    end tell
+end run"""
+    _run(script, album_name)

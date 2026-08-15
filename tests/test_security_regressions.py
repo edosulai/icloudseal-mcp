@@ -19,6 +19,7 @@ from icloudseal_mcp import auth
 from icloudseal_mcp.calendar.caldav import (
     build_event,
     complete_reminder,
+    list_timezones,
     update_event,
     update_reminder,
     validate_timezone,
@@ -976,3 +977,217 @@ def test_ops_cleanup_agent_writes_interval_plist(
     assert "StartInterval" in written.read_text(encoding="utf-8")
     with pytest.raises(services.ServiceError, match="destination"):
         services.exec_ops_cleanup_agent({**frozen, "destination": str(tmp_path / "other.plist")})
+
+
+def test_build_forward_send_prefixes_quotes_and_thread_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "load_credentials",
+        lambda: SimpleNamespace(email="jane@example.com", password="x"),
+    )
+    source = {
+        "from": "alice@example.com",
+        "to": "jane@example.com",
+        "subject": "Hello",
+        "date": "Thu, 26 Mar 2026 12:00:00 +0000",
+        "body": "Original body",
+        "message_id": "<orig@example.com>",
+    }
+    frozen = services.build_forward_send(
+        source=source,
+        to="bob@example.com",
+        note="FYI",
+    )
+    assert frozen["from"] == "jane@example.com"
+    assert frozen["to"] == ["bob@example.com"]
+    assert frozen["subject"] == "Fwd: Hello"
+    assert frozen["inReplyTo"] == "<orig@example.com>"
+    assert frozen["references"] == "<orig@example.com>"
+    assert frozen["body"].startswith("FYI")
+    assert "---------- Forwarded message ----------" in frozen["body"]
+    assert "From: alice@example.com" in frozen["body"]
+    assert "Original body" in frozen["body"]
+
+    already = services.build_forward_send(
+        source={**source, "subject": "Fwd: Hello"},
+        to="bob@example.com",
+    )
+    assert already["subject"] == "Fwd: Hello"
+
+
+def test_notes_create_passes_account_via_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    applescript.create_note("Title", "Body", account="On My Mac")
+    assert calls[0][4:][1] == "On My Mac"
+    assert "On My Mac" not in calls[0][2]
+    with pytest.raises(applescript.NotesError, match="control"):
+        applescript.create_note("Title", "Body", account="On\nMy Mac")
+
+
+def test_photos_create_album_uses_argv_and_refuses_existing_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    photos_script.create_album("Trip 2026")
+    assert calls[0][4:] == ["Trip 2026"]
+    assert "already exists" in calls[0][2]
+    assert "Trip 2026" not in calls[0][2]
+    with pytest.raises(photos_script.PhotosScriptError, match="control"):
+        photos_script.create_album("Trip\n2026")
+
+
+def test_weather_minutely_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        def __init__(self, payload: dict) -> None:
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._raw
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    forecast_body = {
+        "latitude": 52.52,
+        "longitude": 13.41,
+        "timezone": "Europe/Berlin",
+        "current_units": {
+            "temperature_2m": "°C",
+            "weather_code": "wmo code",
+            "wind_speed_10m": "km/h",
+            "precipitation": "mm",
+        },
+        "current": {
+            "time": "2026-03-26T12:00",
+            "temperature_2m": 11.2,
+            "weather_code": 3,
+            "wind_speed_10m": 14.0,
+            "precipitation": 0.0,
+        },
+        "daily_units": {
+            "temperature_2m_max": "°C",
+            "temperature_2m_min": "°C",
+            "precipitation_sum": "mm",
+            "weather_code": "wmo code",
+        },
+        "daily": {
+            "time": ["2026-03-26"],
+            "weather_code": [3],
+            "temperature_2m_max": [12.0],
+            "temperature_2m_min": [6.0],
+            "precipitation_sum": [0.0],
+        },
+        "minutely_15": {
+            "time": ["2026-03-26T12:00"],
+            "weather_code": [3],
+            "temperature_2m": [11.2],
+            "precipitation": [0.0],
+        },
+    }
+    urls: list[str] = []
+
+    def fake_open(req: object, timeout: float = 0) -> _Resp:
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        urls.append(url)
+        return _Resp(forecast_body)
+
+    default = weather_client.forecast(latitude=52.52, longitude=13.41, opener=fake_open)
+    assert "minutely" not in default
+    assert "minutely_15=" not in urls[0]
+
+    minute = weather_client.forecast(
+        latitude=52.52, longitude=13.41, minutely=True, opener=fake_open
+    )
+    assert "minutely_15=" in urls[1]
+    assert minute["minutely"][0]["temperature"] == 11.2
+
+
+def test_music_search_is_read_only_and_fails_if_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(music_script, "music_is_running", lambda: False)
+    with pytest.raises(music_script.MusicError, match="not running"):
+        music_script.search_tracks("hello")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Song\x1fArtist\x1fAlbum\x1e",
+            stderr="",
+        )
+
+    monkeypatch.setattr(music_script, "music_is_running", lambda: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    rows = music_script.search_tracks("hello")
+    assert rows == [{"name": "Song", "artist": "Artist", "album": "Album"}]
+    assert calls[0][4:] == ["hello", "20"]
+    assert "play item" not in calls[0][2]
+    assert "hello" not in calls[0][2]
+    with pytest.raises(music_script.MusicError, match="control"):
+        music_script.search_tracks("bad\nquery")
+
+
+def test_safari_extract_allowlist_refuses_arbitrary_js(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(safari_script.SafariError, match="title_text"):
+        safari_script.page_extract(
+            window_index=1,
+            tab_index=1,
+            name="Docs",
+            url="https://example.com/docs",
+            extract="innerHTML",
+        )
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="Title\nBody", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    text = safari_script.page_extract(
+        window_index=1,
+        tab_index=2,
+        name="Docs",
+        url="https://example.com/docs",
+        extract="title_text",
+    )
+    assert text == "Title\nBody"
+    assert calls[0][4:] == ["1", "2", "Docs", "https://example.com/docs"]
+    assert "document.title" in calls[0][2]
+    assert "innerText" in calls[0][2]
+    assert "innerHTML" not in calls[0][2]
+
+
+def test_list_timezones_filters_and_limits() -> None:
+    zones = list_timezones(query="Asia/Tok", limit=10)
+    assert "Asia/Tokyo" in zones
+    assert all("asia/tok" in zone.lower() for zone in zones)
+    limited = list_timezones(limit=3)
+    assert len(limited) == 3
+    with pytest.raises(ValueError, match="control"):
+        list_timezones(query="Asia\nTokyo")
+    with pytest.raises(ValueError, match="limit"):
+        list_timezones(limit=0)

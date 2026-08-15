@@ -79,6 +79,22 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_timezones(args: argparse.Namespace) -> int:
+    try:
+        zones = caldav.list_timezones(query=args.query, limit=args.limit)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        print(json.dumps({"query": args.query, "count": len(zones), "timezones": zones}, indent=2))
+        return 0
+    table = Table(title=f"Timezones ({len(zones)})")
+    table.add_column("TZID")
+    for zone in zones:
+        table.add_row(zone)
+    console.print(table)
+    return 0
+
+
 def cmd_reminders(args: argparse.Namespace) -> int:
     session = CalendarSession.connect()
     rem = session.list_reminders(include_completed=args.all)
@@ -259,6 +275,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--all", action="store_true", help="Include completed")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_reminders)
+
+    sp = sub.add_parser("timezones", help="List IANA-like timezone names for event create/update.")
+    sp.add_argument("--query", help="Substring filter, e.g. Asia or America/Los")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_timezones)
 
     sp = sub.add_parser("event-add", help="Create an event. Requires --apply.")
     sp.add_argument("--title", required=True)

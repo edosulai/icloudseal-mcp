@@ -141,6 +141,21 @@ def cmd_album_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_album_create(args: argparse.Namespace) -> int:
+    console.rule("Photos album-create" if args.apply else "Photos album-create (dry-run)")
+    console.print(f"Album: {args.album}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to create the album.")
+        return 0
+    try:
+        applescript.create_album(args.album)
+    except PhotosScriptError as exc:
+        console.print(f"[red]Photos error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Created album[/green] {args.album}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("stats", help="Library totals (photos/videos/favorites/albums).")
     sp.add_argument("--json", action="store_true")
@@ -184,6 +199,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--album", required=True)
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_album_add)
+
+    sp = sub.add_parser(
+        "album-create",
+        help="Create an empty Photos album by title. Requires --apply.",
+    )
+    sp.add_argument("--album", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_album_create)
 
 
 __all__ = ["register"]

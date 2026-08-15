@@ -462,9 +462,79 @@ def mail_peek(*, uid: int, folder: str = "INBOX", max_body_chars: int = 8000) ->
         "to": msg.get("To"),
         "subject": msg.get("Subject"),
         "date": msg.get("Date"),
+        "message_id": msg.get("Message-ID"),
         "body": body_text[:max_body_chars],
         "truncated": len(body_text) > max_body_chars,
     }
+
+
+def _forward_subject(subject: str | None) -> str:
+    text = (subject or "(no subject)").strip() or "(no subject)"
+    if text.lower().startswith("fwd:"):
+        return text
+    return f"Fwd: {text}"
+
+
+def build_forward_send(
+    *,
+    source: dict[str, Any],
+    to: list[str] | str,
+    note: str | None = None,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+    attachments: list[str] | str | None = None,
+) -> dict[str, Any]:
+    """Freeze a forward using the existing SMTP send contract."""
+    original_subject = source.get("subject") or "(no subject)"
+    header = (
+        "---------- Forwarded message ----------\n"
+        f"From: {source.get('from') or '(unknown)'}\n"
+        f"Date: {source.get('date') or ''}\n"
+        f"To: {source.get('to') or ''}\n"
+        f"Subject: {original_subject}\n\n"
+        f"{source.get('body') or ''}"
+    )
+    extra = (note or "").rstrip()
+    body = f"{extra}\n\n{header}" if extra else header
+    mid = source.get("message_id") or None
+    return prepare_mail_send(
+        to=to,
+        subject=_forward_subject(str(original_subject)),
+        body=body,
+        cc=cc,
+        bcc=bcc,
+        in_reply_to=mid,
+        references=mid,
+        attachments=attachments,
+    )
+
+
+def prepare_mail_forward(
+    *,
+    uid: int,
+    to: list[str] | str,
+    folder: str = "INBOX",
+    note: str | None = None,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+    attachments: list[str] | str | None = None,
+) -> dict[str, Any]:
+    source = mail_peek(uid=uid, folder=folder)
+    frozen = build_forward_send(
+        source=source,
+        to=to,
+        note=note,
+        cc=cc,
+        bcc=bcc,
+        attachments=attachments,
+    )
+    frozen["sourceUid"] = uid
+    frozen["sourceFolder"] = folder
+    return frozen
+
+
+def exec_mail_forward(payload: dict[str, Any]) -> dict[str, Any]:
+    return exec_mail_send(payload)
 
 
 def mail_triage(
@@ -1309,6 +1379,13 @@ def calendar_list() -> list[dict[str, Any]]:
     ]
 
 
+def calendar_timezones(*, query: str | None = None, limit: int = 50) -> list[str]:
+    try:
+        return caldav.list_timezones(query=query, limit=limit)
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
 def calendar_events(*, days: int = 30) -> list[dict[str, Any]]:
     session = CalendarSession.connect()
     return [e.to_dict() for e in session.list_events(days=days)]
@@ -1653,11 +1730,17 @@ def exec_notes_create(payload: dict[str, Any]) -> dict[str, Any]:
     title = payload["title"]
     body = payload.get("body") or ""
     folder = payload.get("folder") or None
+    account = payload.get("account") or None
     try:
-        applescript.create_note(title, body, folder=folder)
+        applescript.create_note(title, body, folder=folder, account=account)
     except NotesError as exc:
         raise ServiceError(str(exc)) from exc
-    return {"title": title, "bodyChars": len(body), "folder": folder}
+    return {
+        "title": title,
+        "bodyChars": len(body),
+        "folder": folder,
+        "account": account or applescript.DEFAULT_ACCOUNT,
+    }
 
 
 def prepare_note_delete(query: str) -> dict[str, Any]:
@@ -2094,6 +2177,22 @@ def exec_photos_album_add(payload: dict[str, Any]) -> dict[str, Any]:
     return {"filename": filename, "album": album, "ok": True}
 
 
+def prepare_photos_album_create(album: str) -> dict[str, Any]:
+    album_name = (album or "").strip()
+    if not album_name:
+        raise ServiceError("album is required.")
+    return {"album": album_name}
+
+
+def exec_photos_album_create(payload: dict[str, Any]) -> dict[str, Any]:
+    album = str(payload.get("album") or "")
+    try:
+        photos_script.create_album(album)
+    except PhotosScriptError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"album": album, "created": True}
+
+
 def safari_list_tabs() -> list[dict[str, Any]]:
     try:
         tabs = safari_script.list_tabs()
@@ -2255,6 +2354,55 @@ def safari_page_text(
     }
 
 
+def safari_page_extract(
+    *,
+    window_index: int | None = None,
+    tab_index: int | None = None,
+    extract: str = "title_text",
+) -> dict[str, Any]:
+    try:
+        if window_index is None or tab_index is None:
+            current = safari_current_tab()
+            if not current.get("running"):
+                raise ServiceError("Safari is not running.")
+            window_index = int(current["window_index"])
+            tab_index = int(current["tab_index"])
+            name = str(current.get("name") or "")
+            url = str(current.get("url") or "")
+        else:
+            tabs = safari_list_tabs()
+            match = next(
+                (
+                    tab
+                    for tab in tabs
+                    if tab["window_index"] == window_index and tab["tab_index"] == tab_index
+                ),
+                None,
+            )
+            if match is None:
+                raise ServiceError(f"No Safari tab at window {window_index} tab {tab_index}.")
+            name = str(match["name"])
+            url = str(match["url"])
+        text = safari_script.page_extract(
+            window_index=window_index,
+            tab_index=tab_index,
+            name=name,
+            url=url,
+            extract=extract,
+        )
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {
+        "window_index": window_index,
+        "tab_index": tab_index,
+        "name": name,
+        "url": url,
+        "extract": extract,
+        "chars": len(text),
+        "text": text,
+    }
+
+
 def music_now_playing() -> dict[str, Any]:
     try:
         return music_script.now_playing().to_dict()
@@ -2361,6 +2509,14 @@ def exec_music_play(payload: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "ok": True}
 
 
+def music_search(query: str, *, limit: int = music_script.MAX_SEARCH_RESULTS) -> dict[str, Any]:
+    try:
+        tracks = music_script.search_tracks(query, limit=limit)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"query": query, "count": len(tracks), "tracks": tracks}
+
+
 def weather_forecast(
     *,
     place: str | None = None,
@@ -2369,6 +2525,7 @@ def weather_forecast(
     days: int = weather_client.DEFAULT_DAYS,
     temperature_unit: str = "celsius",
     hourly: bool = False,
+    minutely: bool = False,
 ) -> dict[str, Any]:
     try:
         return weather_client.forecast(
@@ -2378,6 +2535,7 @@ def weather_forecast(
             days=days,
             temperature_unit=temperature_unit,
             hourly=hourly,
+            minutely=minutely,
         )
     except WeatherError as exc:
         raise ServiceError(str(exc)) from exc
@@ -2583,6 +2741,7 @@ def register_all_executors() -> None:
     approval.register_executor("mail.apply", exec_mail_apply)
     approval.register_executor("mail.cleanup_strict", exec_mail_cleanup_strict)
     approval.register_executor("mail.send", exec_mail_send)
+    approval.register_executor("mail.forward", exec_mail_forward)
     approval.register_executor("mail.flags", exec_mail_flags)
     approval.register_executor("mail.move", exec_mail_move)
     approval.register_executor("mail.trash", exec_mail_trash)
@@ -2607,6 +2766,7 @@ def register_all_executors() -> None:
     approval.register_executor("photos.export", exec_photos_export)
     approval.register_executor("photos.favorite", exec_photos_favorite)
     approval.register_executor("photos.album_add", exec_photos_album_add)
+    approval.register_executor("photos.album_create", exec_photos_album_create)
     approval.register_executor("safari.open_url", exec_safari_open_url)
     approval.register_executor("safari.close_tab", exec_safari_close_tab)
     approval.register_executor("music.playpause", exec_music_playpause)

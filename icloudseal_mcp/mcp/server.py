@@ -173,6 +173,7 @@ def icloud_list_domains() -> dict[str, Any]:
                     "apply plan",
                     "cleanup strict",
                     "send",
+                    "forward",
                     "flags",
                     "move",
                     "trash",
@@ -188,7 +189,7 @@ def icloud_list_domains() -> dict[str, Any]:
             {
                 "id": "calendar",
                 "transport": "CalDAV",
-                "reads": ["calendars", "events", "reminders"],
+                "reads": ["calendars", "events", "reminders", "timezones"],
                 "notes": "ATTENDEE + IANA timezone on event add/update.",
                 "mutations": [
                     "event-add",
@@ -223,21 +224,21 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "photos",
                 "transport": "Photos.sqlite + AppleScript",
                 "reads": ["stats", "albums", "list"],
-                "mutations": ["export local originals", "favorite", "album-add"],
+                "mutations": ["export local originals", "favorite", "album-add", "album-create"],
                 "requires": "Full Disk Access + Automation",
                 "notes": "Import/upload is not implemented.",
             },
             {
                 "id": "safari",
                 "transport": "AppleScript Safari",
-                "reads": ["tabs", "current", "page-text"],
+                "reads": ["tabs", "current", "page-text", "extract"],
                 "mutations": ["open-url", "search", "close-tab"],
                 "requires": "Automation",
             },
             {
                 "id": "music",
                 "transport": "AppleScript Music.app",
-                "reads": ["now-playing"],
+                "reads": ["now-playing", "search"],
                 "mutations": [
                     "playpause",
                     "next",
@@ -252,7 +253,7 @@ def icloud_list_domains() -> dict[str, Any]:
             {
                 "id": "weather",
                 "transport": "Open-Meteo HTTPS",
-                "reads": ["forecast", "hourly"],
+                "reads": ["forecast", "hourly", "minutely"],
                 "mutations": [],
                 "requires": "network",
             },
@@ -492,6 +493,20 @@ def icloud_calendar_reminders(include_completed: bool = False) -> dict[str, Any]
     try:
         rem = services.calendar_reminders(include_completed=include_completed)
         return {"includeCompleted": include_completed, "count": len(rem), "reminders": rem}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_calendar_timezones",
+    "List IANA-like timezone names for calendar create/update. "
+    "Optional query filters by substring. Does not mutate calendars.",
+    READ_ANN,
+)
+def icloud_calendar_timezones(query: str | None = None, limit: int = 50) -> dict[str, Any]:
+    try:
+        zones = services.calendar_timezones(query=query, limit=limit)
+        return {"query": query, "count": len(zones), "timezones": zones}
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -736,6 +751,27 @@ def icloud_safari_page_text(
         return _err(exc)
 
 
+@_tool(
+    "icloud_safari_extract",
+    "Return allowlisted title+innerText from one open Safari tab. "
+    "extract must be title_text. Arbitrary JavaScript is refused.",
+    READ_ANN,
+)
+def icloud_safari_extract(
+    window_index: int | None = None,
+    tab_index: int | None = None,
+    extract: str = "title_text",
+) -> dict[str, Any]:
+    try:
+        return services.safari_page_extract(
+            window_index=window_index,
+            tab_index=tab_index,
+            extract=extract,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # ---------------------------------------------------------------------------
 # Music reads
 # ---------------------------------------------------------------------------
@@ -750,6 +786,19 @@ def icloud_safari_page_text(
 def icloud_music_now_playing() -> dict[str, Any]:
     try:
         return services.music_now_playing()
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_music_search",
+    "Search Music.app library and return names only. Never plays a track. "
+    "Fails if Music is not running. Does not launch Music.",
+    READ_ANN,
+)
+def icloud_music_search(query: str, limit: int = 20) -> dict[str, Any]:
+    try:
+        return services.music_search(query, limit=limit)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -774,6 +823,7 @@ def icloud_weather_forecast(
     days: int = 3,
     temperature_unit: str = "celsius",
     hourly: bool = False,
+    minutely: bool = False,
 ) -> dict[str, Any]:
     try:
         return services.weather_forecast(
@@ -783,6 +833,7 @@ def icloud_weather_forecast(
             days=days,
             temperature_unit=temperature_unit,
             hourly=hourly,
+            minutely=minutely,
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -939,6 +990,56 @@ def icloud_prepare_mail_send(
         return approval.prepare_action(
             action="mail.send",
             target=f"mail:send:{frozen['messageId']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_mail_forward",
+    "Prepare forwarding one cached iCloud Mail message via SMTP. "
+    "Prefixes Fwd: if missing and quotes the original. "
+    "Show exact recipients/subject/body before Touch ID.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_forward(
+    uid: int,
+    to: list[str] | str,
+    folder: str = "INBOX",
+    note: str | None = None,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+    attachments: list[str] | str | None = None,
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_mail_forward(
+            uid=uid,
+            to=to,
+            folder=folder,
+            note=note,
+            cc=cc,
+            bcc=bcc,
+            attachments=attachments,
+        )
+        recipients = ", ".join(frozen["to"])
+        cc_line = ", ".join(frozen["cc"]) or "(none)"
+        bcc_line = ", ".join(frozen["bcc"]) or "(none)"
+        attach_line = ", ".join(item["name"] for item in frozen["attachments"]) or "(none)"
+        preview = (
+            f"Forward iCloud Mail\nFrom: {frozen['from']}\nTo: {recipients}\n"
+            f"Cc: {cc_line}\nBcc: {bcc_line}\nSubject: {frozen['subject']}\n"
+            f"Source: {folder} UID {uid}\n"
+            f"In-Reply-To: {frozen['inReplyTo'] or '(none)'}\n"
+            f"References: {frozen['references'] or '(none)'}\n"
+            f"Attachments: {attach_line}\n"
+            f"Body chars: {len(frozen['body'])}\nMessage-ID: {frozen['messageId']}\n"
+            f"Plan SHA-256: {frozen['planSha256']}"
+        )
+        return approval.prepare_action(
+            action="mail.forward",
+            target=f"mail:forward:{frozen['messageId']}",
             preview=preview,
             payload=frozen,
         )
@@ -1417,18 +1518,28 @@ def icloud_prepare_messages_send(
 
 @_tool("icloud_prepare_notes_create", "Prepare creating a Notes.app note.", PREPARE_ANN)
 def icloud_prepare_notes_create(
-    title: str, body: str | None = None, folder: str | None = None
+    title: str,
+    body: str | None = None,
+    folder: str | None = None,
+    account: str | None = None,
 ) -> dict[str, Any]:
     try:
+        account_name = account or "iCloud"
         preview = (
-            f"Create note\nTitle: {title}\nFolder: {folder or '(default iCloud)'}\n\n"
+            f"Create note\nTitle: {title}\nAccount: {account_name}\n"
+            f"Folder: {folder or '(default)'}\n\n"
             f"{body or ''}"
         )
         return approval.prepare_action(
             action="notes.create",
             target=f"note:{title}",
             preview=preview,
-            payload={"title": title, "body": body or "", "folder": folder},
+            payload={
+                "title": title,
+                "body": body or "",
+                "folder": folder,
+                "account": account_name,
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1636,6 +1747,26 @@ def icloud_prepare_photos_album_add(filename: str, album: str) -> dict[str, Any]
         return approval.prepare_action(
             action="photos.album_add",
             target=f"photos:{frozen['filename']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_photos_album_create",
+    "Prepare creating an empty Photos album by title. "
+    "Does not import or upload photos.",
+    PREPARE_ANN,
+)
+def icloud_prepare_photos_album_create(album: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_photos_album_create(album)
+        preview = f"Create Photos album\nAlbum: {frozen['album']}\nDoes not import photos."
+        return approval.prepare_action(
+            action="photos.album_create",
+            target=f"photos:album:{frozen['album']}",
             preview=preview,
             payload=frozen,
         )

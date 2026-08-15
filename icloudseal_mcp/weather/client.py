@@ -29,6 +29,7 @@ ATTRIBUTION = "Weather data by Open-Meteo.com"
 CURRENT_FIELDS = "temperature_2m,weather_code,wind_speed_10m,precipitation"
 DAILY_FIELDS = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum"
 HOURLY_FIELDS = "temperature_2m,weather_code,precipitation,wind_speed_10m"
+MINUTELY_FIELDS = "temperature_2m,weather_code,precipitation"
 
 WMO_TEXT = {
     0: "Clear",
@@ -260,6 +261,32 @@ def _hourly_rows(hourly: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _minutely_rows(minutely: dict[str, Any]) -> list[dict[str, Any]]:
+    times = minutely.get("time") or []
+    if not isinstance(times, list):
+        return []
+    codes = minutely.get("weather_code") or []
+    temps = minutely.get("temperature_2m") or []
+    precip = minutely.get("precipitation") or []
+    rows: list[dict[str, Any]] = []
+    for index, stamp in enumerate(times):
+        code = _optional_int(codes[index]) if index < len(codes) else None
+        rows.append(
+            {
+                "time": stamp,
+                "weather_code": code,
+                "condition": wmo_text(code),
+                "temperature": (
+                    _optional_number(temps[index]) if index < len(temps) else None
+                ),
+                "precipitation": (
+                    _optional_number(precip[index]) if index < len(precip) else None
+                ),
+            }
+        )
+    return rows
+
+
 def forecast(
     *,
     place: str | None = None,
@@ -268,9 +295,10 @@ def forecast(
     days: object = DEFAULT_DAYS,
     temperature_unit: str = "celsius",
     hourly: bool = False,
+    minutely: bool = False,
     opener: UrlOpen | None = None,
 ) -> dict[str, Any]:
-    """Current conditions plus a short daily forecast. Hourly is opt-in."""
+    """Current conditions plus a short daily forecast. Hourly/minutely are opt-in."""
     has_place = bool((place or "").strip())
     has_any_coord = latitude is not None or longitude is not None
     if has_place == has_any_coord:
@@ -298,6 +326,8 @@ def forecast(
     }
     if hourly:
         params["hourly"] = HOURLY_FIELDS
+    if minutely:
+        params["minutely_15"] = MINUTELY_FIELDS
     query = urllib.parse.urlencode(params)
     url = f"https://{FORECAST_HOST}/v1/forecast?{query}"
     data = _request(url, opener=opener or urlopen)
@@ -342,4 +372,9 @@ def forecast(
     if hourly:
         hourly_data = data.get("hourly") if isinstance(data.get("hourly"), dict) else {}
         payload["hourly"] = _hourly_rows(hourly_data)
+    if minutely:
+        minutely_data = (
+            data.get("minutely_15") if isinstance(data.get("minutely_15"), dict) else {}
+        )
+        payload["minutely"] = _minutely_rows(minutely_data)
     return payload

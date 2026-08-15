@@ -49,6 +49,25 @@ def cmd_now(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    tracks = _guard(lambda: applescript.search_tracks(args.query, limit=args.limit))
+    if tracks is None:
+        return 2
+    if args.json:
+        print(json.dumps({"query": args.query, "count": len(tracks), "tracks": tracks}, indent=2))
+        return 0
+    if not tracks:
+        console.print("[dim]No matching tracks.[/dim]")
+        return 0
+    for track in tracks:
+        artist = track.get("artist") or ""
+        album = track.get("album") or ""
+        extras = " — ".join(part for part in (artist, album) if part)
+        label = track.get("name") or "(untitled)"
+        console.print(f"{label}{(' — ' + extras) if extras else ''}")
+    return 0
+
+
 def _cmd_playback(args: argparse.Namespace, action: str) -> int:
     track = _guard(applescript.now_playing)
     if track is None:
@@ -132,6 +151,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("now", help="Show now-playing (does not launch Music).")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_now)
+
+    sp = sub.add_parser(
+        "search",
+        help="Search Music.app library and print names (does not play).",
+    )
+    sp.add_argument("--query", required=True)
+    sp.add_argument("--limit", type=int, default=applescript.MAX_SEARCH_RESULTS)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_search)
 
     sp = sub.add_parser("playpause", help="Toggle play/pause. Requires --apply.")
     sp.add_argument("--apply", action="store_true")

@@ -720,6 +720,45 @@ def cmd_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forward(args: argparse.Namespace) -> int:
+    from ..mcp.services import prepare_mail_forward
+
+    try:
+        frozen = prepare_mail_forward(
+            uid=args.uid,
+            to=args.to,
+            folder=args.folder,
+            note=args.note,
+            cc=args.cc,
+            bcc=args.bcc,
+            attachments=args.attach,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(str(exc)) from exc
+
+    console.rule("Forward mail (dry-run)" if not args.apply else "Forward mail")
+    console.print(f"From: {frozen['from']}")
+    console.print(f"To: {', '.join(frozen['to'])}")
+    console.print(f"Cc: {', '.join(frozen['cc']) or '(none)'}")
+    console.print(f"Bcc: {', '.join(frozen['bcc']) or '(none)'}")
+    console.print(f"Subject: {frozen['subject']}")
+    console.print(f"Source: {frozen['sourceFolder']} UID {frozen['sourceUid']}")
+    console.print(f"Body chars: {len(frozen['body'])}")
+    if frozen.get("inReplyTo"):
+        console.print(f"In-Reply-To: {frozen['inReplyTo']}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to forward via SMTP.")
+        return 0
+    try:
+        result = send_frozen(frozen, password=auth.load_credentials().password)
+    except SMTPError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(
+        f"[green]Forwarded[/green] {result['subject']!r} to {result['recipients']} recipient(s)."
+    )
+    return 0
+
+
 def cmd_create_folder(args: argparse.Namespace) -> int:
     name = (args.folder or "").strip()
     if not name or len(name) > 255:
@@ -894,6 +933,25 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     sp.add_argument("--apply", action="store_true", help="Actually send the message")
     sp.set_defaults(func=cmd_send)
+
+    sp = sub.add_parser(
+        "forward",
+        help="Forward one message via iCloud SMTP. Requires --apply.",
+    )
+    sp.add_argument("uid", type=int)
+    sp.add_argument("--to", required=True, help="Comma-separated To recipients")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--note", help="Optional note above the quoted original")
+    sp.add_argument("--cc", help="Comma-separated Cc recipients")
+    sp.add_argument("--bcc", help="Comma-separated Bcc recipients")
+    sp.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="Local file to attach (repeatable, size-capped)",
+    )
+    sp.add_argument("--apply", action="store_true", help="Actually send the forward")
+    sp.set_defaults(func=cmd_forward)
 
     sp = sub.add_parser("mark-read", help="Mark cached messages as read. Requires --apply.")
     sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")

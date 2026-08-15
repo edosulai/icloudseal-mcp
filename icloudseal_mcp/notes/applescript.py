@@ -122,32 +122,58 @@ def list_folders() -> list[NoteFolder]:
     return folders
 
 
-def create_note(title: str, body: str, *, folder: str | None = None) -> None:
+DEFAULT_ACCOUNT = "iCloud"
+MAX_ACCOUNT_LEN = 80
+MAX_FOLDER_LEN = 200
+
+
+def _clean_label(value: str, field: str, *, max_len: int) -> str:
+    name = (value or "").strip()
+    if not name:
+        raise NotesError(f"{field} is required.")
+    if any(ch in name for ch in "\r\n\x00"):
+        raise NotesError(f"{field} must not contain control characters.")
+    if len(name) > max_len:
+        raise NotesError(f"{field} is limited to {max_len} characters.")
+    return name
+
+
+def create_note(
+    title: str,
+    body: str,
+    *,
+    folder: str | None = None,
+    account: str | None = None,
+) -> None:
     content = f"{title}\n{body}" if body else title
     content_html = html.escape(content).replace("\n", "<br>")
+    account_name = _clean_label(
+        account or DEFAULT_ACCOUNT, "account", max_len=MAX_ACCOUNT_LEN
+    )
     if folder:
-        if any(ch in folder for ch in "\r\n\x00"):
-            raise NotesError("Folder name must not contain control characters.")
+        folder_name = _clean_label(folder, "folder", max_len=MAX_FOLDER_LEN)
         script = """on run argv
     set noteBody to item 1 of argv
-    set folderName to item 2 of argv
+    set accountName to item 2 of argv
+    set folderName to item 3 of argv
     tell application "Notes"
-        tell account "iCloud"
+        tell account accountName
             make new note at folder folderName with properties {body:noteBody}
         end tell
     end tell
 end run"""
-        _run(script, content_html, folder)
+        _run(script, content_html, account_name, folder_name)
         return
     script = """on run argv
     set noteBody to item 1 of argv
+    set accountName to item 2 of argv
     tell application "Notes"
-        tell account "iCloud"
+        tell account accountName
             make new note with properties {body:noteBody}
         end tell
     end tell
 end run"""
-    _run(script, content_html)
+    _run(script, content_html, account_name)
 
 
 def update_note(note_id: str, *, title: str | None = None, body: str | None = None) -> None:

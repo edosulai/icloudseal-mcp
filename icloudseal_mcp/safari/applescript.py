@@ -223,3 +223,43 @@ def page_text(
 end run"""
     raw = _run(script, str(window_index), str(tab_index), name, canonical)
     return raw[:max_chars]
+
+
+ALLOWED_EXTRACTS = frozenset({"title_text"})
+
+def page_extract(
+    *,
+    window_index: int,
+    tab_index: int,
+    name: str,
+    url: str,
+    extract: str = "title_text",
+    max_chars: int = MAX_PAGE_CHARS,
+) -> str:
+    """Return allowlisted title+innerText. Refuses arbitrary JavaScript."""
+    if extract not in ALLOWED_EXTRACTS:
+        raise SafariError("extract must be title_text (arbitrary JavaScript is refused).")
+    if not isinstance(window_index, int) or isinstance(window_index, bool) or window_index < 1:
+        raise SafariError("window_index must be a positive integer.")
+    if not isinstance(tab_index, int) or isinstance(tab_index, bool) or tab_index < 1:
+        raise SafariError("tab_index must be a positive integer.")
+    if not 1 <= max_chars <= MAX_PAGE_CHARS:
+        raise SafariError(f"max_chars must be between 1 and {MAX_PAGE_CHARS}.")
+    if any(ch in (name or "") for ch in "\r\n\x00"):
+        raise SafariError("tab name must not contain control characters.")
+    canonical = validate_url(url)
+    # JS is a constant in this script. User input never reaches do JavaScript.
+    script = """on run argv
+    set wIdx to item 1 of argv as integer
+    set tIdx to item 2 of argv as integer
+    set expectedName to item 3 of argv
+    set expectedURL to item 4 of argv
+    tell application "Safari"
+        set theTab to tab tIdx of window wIdx
+        if (name of theTab) is not expectedName then error "Safari tab name changed"
+        if (URL of theTab) is not expectedURL then error "Safari tab URL changed"
+        return do JavaScript "(function(){var t=document.title||'';var b=(document.body&&document.body.innerText)?document.body.innerText:'';return t+'\\n'+b;})()" in theTab
+    end tell
+end run"""
+    raw = _run(script, str(window_index), str(tab_index), name, canonical)
+    return raw[:max_chars]

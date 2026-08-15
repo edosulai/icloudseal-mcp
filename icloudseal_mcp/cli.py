@@ -31,7 +31,7 @@ from .weather import commands as weather_commands
 
 DOMAINS = {
     "mail": (
-        "iCloud Mail (IMAP + SMTP): triage, cleanup, gated send/flags/move/trash/folder.",
+        "iCloud Mail (IMAP + SMTP): triage, cleanup, gated send/forward/flags/move/trash/folder.",
         mail_commands.register,
     ),
     "contacts": (
@@ -39,7 +39,7 @@ DOMAINS = {
         contacts_commands.register,
     ),
     "calendar": (
-        "iCloud Calendar + Reminders (CalDAV): list, gated add/update/rm/done.",
+        "iCloud Calendar + Reminders (CalDAV): list/timezones, gated add/update/rm/done.",
         calendar_commands.register,
     ),
     "messages": (
@@ -55,19 +55,19 @@ DOMAINS = {
         drive_commands.register,
     ),
     "photos": (
-        "iCloud Photos: stats/albums/list, gated export/favorite/album-add.",
+        "iCloud Photos: stats/albums/list, gated export/favorite/album-add/album-create.",
         photos_commands.register,
     ),
     "safari": (
-        "Safari (AppleScript): tabs/page-text, gated open/search/close.",
+        "Safari (AppleScript): tabs/page-text/extract, gated open/search/close.",
         safari_commands.register,
     ),
     "music": (
-        "Music.app (AppleScript): now-playing, gated playback/volume/shuffle/repeat.",
+        "Music.app (AppleScript): now-playing/search, gated playback/volume/shuffle/repeat.",
         music_commands.register,
     ),
     "weather": (
-        "Weather (Open-Meteo): current plus daily/hourly forecast.",
+        "Weather (Open-Meteo): current plus daily/hourly/minutely forecast.",
         weather_commands.register,
     ),
     "maps": (

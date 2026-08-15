@@ -215,6 +215,58 @@ def cmd_source(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_extract(args: argparse.Namespace) -> int:
+    tabs = _guard(applescript.list_tabs)
+    if tabs is None:
+        return 2
+    if args.window is None or args.tab is None:
+        match = next((tab for tab in tabs if tab.is_current), None)
+        if match is None:
+            console.print("[dim]Safari is not running or has no current tab.[/dim]")
+            return 2
+    else:
+        match = next(
+            (
+                tab
+                for tab in tabs
+                if tab.window_index == args.window and tab.tab_index == args.tab
+            ),
+            None,
+        )
+        if match is None:
+            console.print(f"[red]No Safari tab at window {args.window} tab {args.tab}.[/red]")
+            return 2
+    try:
+        text = applescript.page_extract(
+            window_index=match.window_index,
+            tab_index=match.tab_index,
+            name=match.name,
+            url=match.url,
+            extract=args.extract,
+        )
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "window_index": match.window_index,
+                    "tab_index": match.tab_index,
+                    "name": match.name,
+                    "url": match.url,
+                    "extract": args.extract,
+                    "text": text,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    console.rule(match.name or match.url)
+    console.print(text)
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("tabs", help="List open Safari tabs (does not launch Safari).")
     sp.add_argument("--json", action="store_true")
@@ -247,6 +299,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--tab", type=int)
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_source)
+
+    sp = sub.add_parser(
+        "extract",
+        help="Print allowlisted title+innerText of one Safari tab.",
+    )
+    sp.add_argument("--window", type=int)
+    sp.add_argument("--tab", type=int)
+    sp.add_argument(
+        "--extract",
+        default="title_text",
+        choices=sorted(applescript.ALLOWED_EXTRACTS),
+        help="Allowlisted extract (title_text only).",
+    )
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_extract)
 
 
 __all__ = ["register"]

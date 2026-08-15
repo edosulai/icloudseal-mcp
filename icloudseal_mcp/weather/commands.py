@@ -47,6 +47,11 @@ def _print_forecast(payload: dict) -> None:
             f"{hour.get('time')}: {hour.get('temperature')}{temp_u} "
             f"{hour.get('condition') or ''}"
         )
+    for minute in payload.get("minutely") or []:
+        console.print(
+            f"{minute.get('time')}: {minute.get('temperature')}{temp_u} "
+            f"{minute.get('condition') or ''}"
+        )
     console.print(f"[dim]{payload.get('attribution')}[/dim]")
 
 
@@ -64,6 +69,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             days=args.days,
             temperature_unit=args.unit,
             hourly=args.hourly,
+            minutely=args.minutely,
         )
     )
     if payload is None:
@@ -90,6 +96,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         default="celsius",
     )
     sp.add_argument("--hourly", action="store_true", help="Include hourly rows.")
+    sp.add_argument("--minutely", action="store_true", help="Include 15-minute rows.")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_forecast)
 

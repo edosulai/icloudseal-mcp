@@ -132,6 +132,45 @@ def validate_timezone(value: str) -> str:
     return token
 
 
+COMMON_TIMEZONES = (
+    "UTC",
+    "America/Los_Angeles",
+    "America/Denver",
+    "America/Chicago",
+    "America/New_York",
+    "America/Sao_Paulo",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Africa/Johannesburg",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Singapore",
+    "Asia/Tokyo",
+    "Australia/Sydney",
+    "Pacific/Auckland",
+)
+
+
+def list_timezones(*, query: str | None = None, limit: int = 50) -> list[str]:
+    """Read-only IANA-like timezone picker. Does not mutate calendars."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("limit must be an integer from 1 to 200.")
+    needle = (query or "").strip()
+    if any(ch in needle for ch in "\r\n\x00"):
+        raise ValueError("query must not contain control characters.")
+    try:
+        from zoneinfo import available_timezones
+
+        zones = sorted(z for z in available_timezones() if z and not z.startswith("SystemV/"))
+    except Exception:
+        zones = list(COMMON_TIMEZONES)
+    if needle:
+        lowered = needle.lower()
+        zones = [z for z in zones if lowered in z.lower()]
+    return [z for z in zones if _TZID_RE.fullmatch(z)][:limit]
+
+
 def _ical_dt(value: str, *, all_day: bool = False, timezone: str | None = None) -> tuple[str, str]:
     """Return (param, formatted) for a DTSTART/DTEND/DUE value.
 

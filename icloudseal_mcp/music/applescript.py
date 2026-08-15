@@ -209,3 +209,52 @@ def play_by_name(query: str) -> None:
     end tell
 end run"""
     _run(script, candidate)
+
+
+RECORD = "\x1e"
+MAX_SEARCH_RESULTS = 20
+
+
+def search_tracks(query: str, *, limit: int = MAX_SEARCH_RESULTS) -> list[dict[str, Any]]:
+    """Search Music.app library and return names only. Never plays a track."""
+    candidate = (query or "").strip()
+    if not candidate:
+        raise MusicError("Search query is required.")
+    if any(ch in candidate for ch in "\r\n\x00"):
+        raise MusicError("Search query must not contain control characters.")
+    if len(candidate) > MAX_SEARCH_LEN:
+        raise MusicError(f"Search query is limited to {MAX_SEARCH_LEN} characters.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_SEARCH_RESULTS:
+        raise MusicError(f"limit must be an integer from 1 to {MAX_SEARCH_RESULTS}.")
+    if not music_is_running():
+        raise MusicError("Music is not running.")
+    script = """on run argv
+    set theQuery to item 1 of argv
+    set theLimit to item 2 of argv as integer
+    tell application "Music"
+        set theResults to search playlist 1 for theQuery
+        set output to ""
+        set n to count of theResults
+        if n is 0 then return output
+        if n > theLimit then set n to theLimit
+        repeat with i from 1 to n
+            set theTrack to item i of theResults
+            set output to output & (name of theTrack) & "\x1f" & (artist of theTrack) & "\x1f" & (album of theTrack) & "\x1e"
+        end repeat
+        return output
+    end tell
+end run"""
+    raw = _run(script, candidate, str(limit))
+    rows: list[dict[str, Any]] = []
+    for rec in raw.split(RECORD):
+        if not rec.strip():
+            continue
+        parts = rec.split(FIELD)
+        rows.append(
+            {
+                "name": _optional(parts[0]) if parts else None,
+                "artist": _optional(parts[1]) if len(parts) > 1 else None,
+                "album": _optional(parts[2]) if len(parts) > 2 else None,
+            }
+        )
+    return rows

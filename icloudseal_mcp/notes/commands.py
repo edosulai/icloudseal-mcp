@@ -122,6 +122,7 @@ def cmd_folders(args: argparse.Namespace) -> int:
 def cmd_create(args: argparse.Namespace) -> int:
     console.rule("New note (dry-run)")
     console.print(f"[bold]{args.title}[/bold]")
+    console.print(f"Account: {args.account or applescript.DEFAULT_ACCOUNT}")
     if args.folder:
         console.print(f"Folder: {args.folder}")
     if args.body:
@@ -130,7 +131,12 @@ def cmd_create(args: argparse.Namespace) -> int:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to create.")
         return 0
     if _guard(
-        lambda: applescript.create_note(args.title, args.body or "", folder=args.folder)
+        lambda: applescript.create_note(
+            args.title,
+            args.body or "",
+            folder=args.folder,
+            account=args.account,
+        )
     ) is None:
         return 2
     console.print(f"[green]Created note[/green] {args.title}")
@@ -207,7 +213,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("create", help="Create a note. Requires --apply.")
     sp.add_argument("--title", required=True)
     sp.add_argument("--body")
-    sp.add_argument("--folder", help="iCloud folder name (create stays iCloud-only).")
+    sp.add_argument("--account", help="Notes.app account name (default: iCloud).")
+    sp.add_argument("--folder", help="Folder name inside the chosen account.")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_create)
 

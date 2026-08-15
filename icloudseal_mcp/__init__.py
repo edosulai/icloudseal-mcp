@@ -5,4 +5,4 @@ Photos, Safari, Music, Weather, Maps, Health, ops, and Shortcuts. Sensitive
 mutations require native macOS approval (Touch ID / password).
 """
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"

@@ -47,6 +47,7 @@ reports/
 
 # Generated / vendor / editor
 graphify-out/
+.copilot/
 .claude/
 .codex/
 .agents/

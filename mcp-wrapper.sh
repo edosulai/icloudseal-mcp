@@ -42,6 +42,13 @@ fi
 export PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:$PYTHONPATH}"
 export ICLOUDSEAL_PROJECT_ROOT="$SCRIPT_DIR"
 
+# Keep the global /icloudseal skill in sync when an agent attaches this MCP.
+# stdout stays reserved for MCP stdio. Failure must not block startup.
+if ! "$VENV_PY" -m icloudseal_mcp.cli install-skill >/dev/null; then
+  printf '%s script=icloudseal-mcp-wrapper pid=%s event=skill-install-failed\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >&2
+fi
+
 printf '%s script=icloudseal-mcp-wrapper pid=%s event=start detail=python=%s verbose=%s\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$VENV_PY" "$VERBOSE" >&2
 

@@ -11,6 +11,15 @@ Rules:
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
+## icloudseal skill
+
+Bundled at `skills/icloudseal/SKILL.md`. `icloudseal-mcp install-skill` (also
+run by `mcp-wrapper.sh`) copies it to the user-global Copilot skill dir.
+When the user types `/icloudseal` or asks about iCloud mail, calendar,
+messages, notes, Drive, Photos, Safari, Music, or sealed mutations, follow
+that skill before improvising. Default host is Copilot only; pass
+`--platform all` explicitly.
+
 ## Runtime and approval policy
 
 - Credentials live in the macOS Keychain (service `icloudseal-mcp`).

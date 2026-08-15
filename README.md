@@ -25,7 +25,8 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 > - **Shortcuts** — list installed shortcuts plus gated run by exact name (optional frozen text input).
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~105 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (103 tools).
+> Bundled skill: `icloudseal-mcp install-skill` (Copilot by default; `mcp-wrapper.sh` auto-installs).
 
 ## Seal family & security model
 
@@ -51,6 +52,8 @@ Principles:
 | Command | Scope |
 |---|---|
 | `icloudseal-mcp <domain> <action>` | Multi-domain entry point (`mail`, `contacts`, …) |
+| `icloudseal-mcp install-skill` | Copy bundled `/icloudseal` skill to `~/.copilot/skills/` (default host) |
+| `icloudseal-mcp uninstall-skill` | Remove only that skill copy |
 | `mail-agent <action>` | Legacy alias = `icloudseal-mcp mail <action>` (kept for back-compat) |
 
 So `mail-agent list` and `icloudseal-mcp mail list` are identical.
@@ -69,8 +72,14 @@ Catalog key: `icloudseal` (dotfiles reconcile). Point the IDE at `mcp-wrapper.sh
 }
 ```
 
-The wrapper self-bootstraps `.venv` + editable install if needed, then runs
-`python -m icloudseal_mcp.mcp.server` over stdio.
+The wrapper self-bootstraps `.venv` + editable install if needed, installs
+the bundled `/icloudseal` skill to Copilot (stderr only; stdout stays MCP
+stdio), then runs `python -m icloudseal_mcp.mcp.server`.
+
+Packaged skill: [`skills/icloudseal/SKILL.md`](skills/icloudseal/SKILL.md).
+Default `install-skill` host is **copilot only**. Pass `--platform all` or
+a comma list (`claude,codex,…`) explicitly. A workspace copy plus the
+global Copilot copy can both be discovered — that is expected.
 
 ### Agent workflow
 

@@ -14,6 +14,7 @@ import argparse
 import sys
 
 from . import auth
+from . import skill_install
 from .calendar import commands as calendar_commands
 from .common import console
 from .contacts import commands as contacts_commands
@@ -100,6 +101,7 @@ def build_icloud_parser() -> argparse.ArgumentParser:
         dp = domain_sub.add_parser(name, help=help_text)
         action_sub = dp.add_subparsers(dest="cmd", required=True)
         register(action_sub)
+    skill_install.add_skill_parsers(domain_sub)
     return p
 
 

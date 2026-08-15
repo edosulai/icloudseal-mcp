@@ -144,8 +144,9 @@ only exception, and the JS is a constant). Photos import/upload.
 ## Related paths
 
 - Repo folder: `icloudseal-mcp`
-- Wrapper: `mcp-wrapper.sh`
+- Wrapper: `mcp-wrapper.sh` (also best-effort installs the agent skill)
 - MCP catalog key: `icloudseal`
+- Bundled skill: `skills/icloudseal/` — `icloudseal-mcp install-skill` defaults to Copilot only
 - Sibling tools: `whatseal-mcp`, `instaseal-mcp`
 
 ## Capability notes for agents

@@ -9,16 +9,16 @@ password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
 > **Status — seven domains live (CLI + MCP)**
-> - **Mail (IMAP)** — sync/list/triage plus gated cleanup & job leads.
+> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, and send.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
-> - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/rm/done.
+> - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/update/rm/done.
 > - **Messages / SMS** — read `chat.db` (chats/list/search/export) plus gated AppleScript send.
 > - **Notes (AppleScript)** — list/search/read plus gated create/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
 > - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~49 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~51 tools).
 
 ## Seal family & security model
 
@@ -78,9 +78,9 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Group | Tools |
 |---|---|
 | Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
-| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup |
+| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup/send |
 | Contacts | list/search/export + prepare create/update/delete |
-| Calendar | list/events/reminders + prepare event/reminder mutations |
+| Calendar | list/events/reminders + prepare event add/update/rm and reminder mutations |
 | Messages | chats/list/search/export + prepare send |
 | Notes | list/search/read + prepare create/delete |
 | Drive | ls/tree/find/read + prepare put/rm |
@@ -107,11 +107,11 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
         │   notes/ AppleScript  drive/ fs  photos/ │
         │   native-approval.swift (Touch ID gate)  │
            └──────────────────────────────────────────┘
-             IMAP/DAV · local DB · AppleScript · CloudDocs
+             IMAP/SMTP/DAV · local DB · AppleScript · CloudDocs
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
-Keychain (service `icloudseal-mcp`) authenticates IMAP **and** CardDAV/CalDAV.
+Keychain (service `icloudseal-mcp`) authenticates IMAP, SMTP, **and** CardDAV/CalDAV.
 **No external LLM API** — data stays on this Mac except what enters the chat.
 
 
@@ -160,6 +160,7 @@ The live file is gitignored and must not be committed.
 | `apply p.json [--apply]` | Backup `.eml`, then move/delete via IMAP |
 | `cleanup strict [--apply]` | Full-sync INBOX, plan/delete known bulk senders |
 | `jobs collect --since 7d --out p.json` | Extract & score job leads (review-only) |
+| `send --to --subject --body [--cc --bcc] [--apply]` | Send via iCloud SMTP (From = Keychain email) |
 
 ## Contacts commands (`icloudseal-mcp contacts …`)
 
@@ -183,6 +184,7 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 | `events [--days 30] [--json]` | Upcoming events |
 | `reminders [--all] [--json]` | Reminders (open by default) |
 | `event-add --title --start [--end --location --calendar --all-day] [--apply]` | Create event |
+| `event-update <query> [--title --start --end --location --all-day] [--apply]` | Patch event (RRULE/VALARM kept; `.ics` backed up) |
 | `event-rm <query> [--apply]` | Delete event (`.ics` backed up) |
 | `reminder-add --title [--due --list] [--apply]` | Create reminder |
 | `reminder-done <query> [--apply]` | Mark reminder complete |
@@ -250,7 +252,7 @@ downloaded and reports the rest.
   `Deleted Messages` (no local `.eml` backup). Drive `rm` goes to macOS Trash.
 - **ETag-guarded DAV writes.** Contact/calendar updates & deletes use `If-Match`
   so concurrent edits aren't clobbered; creates use `If-None-Match: *`.
-- **Property-preserving updates.** Contact/reminder updates retain unknown
+- **Property-preserving updates.** Contact/event/reminder updates retain unknown
   vCard/iCalendar properties, recurrence rules, alarms, and attachments.
 - **Read-only Messages DB.** `chat.db` is opened `mode=ro&immutable=1`; the tool
   never writes to it.
@@ -263,7 +265,7 @@ downloaded and reports the rest.
 - **Private local state.** State/backup/export directories use mode `0700` and
   sensitive files use `0600`; approval outcomes are atomically replaced.
 - **One credential, least surprise.** Same Keychain item authenticates IMAP,
-  CardDAV, and CalDAV.
+  SMTP, CardDAV, and CalDAV.
 
 ### Managed MCP output paths
 

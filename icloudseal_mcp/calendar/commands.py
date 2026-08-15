@@ -129,6 +129,36 @@ def cmd_event_rm(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_event_update(args: argparse.Namespace) -> int:
+    if all(value is None for value in (args.title, args.start, args.end, args.location)):
+        raise SystemExit("Provide at least one of --title, --start, --end, --location.")
+    session = CalendarSession.connect()
+    target = _resolve_one(session.list_events(days=args.days), args.query)
+    try:
+        ics = caldav.update_event(
+            target.raw,
+            summary=args.title,
+            start=args.start,
+            end=args.end,
+            location=args.location,
+            all_day=args.all_day or None,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(
+        f"Would update event: [bold]{target.summary}[/bold] ({target.start})"
+    )
+    console.rule("Updated iCalendar (preview)")
+    console.print(ics)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to update (.ics backed up first).")
+        return 0
+    backup = _backup([target], "event-update")
+    session.update(target, ics)
+    console.print(f"[green]Updated event[/green] {target.uid}. Backup: {backup}")
+    return 0
+
+
 def cmd_reminder_add(args: argparse.Namespace) -> int:
     uid = str(uuid.uuid4()).upper()
     ics = caldav.build_reminder(uid=uid, summary=args.title, due=args.due)
@@ -205,6 +235,20 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--days", type=int, default=365, help="Search window")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_event_rm)
+
+    sp = sub.add_parser(
+        "event-update",
+        help="Update an event by UID or unique match. Requires --apply.",
+    )
+    sp.add_argument("query")
+    sp.add_argument("--title")
+    sp.add_argument("--start", help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
+    sp.add_argument("--end", help="Same format as --start")
+    sp.add_argument("--location")
+    sp.add_argument("--all-day", action="store_true")
+    sp.add_argument("--days", type=int, default=365, help="Search window")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_event_update)
 
     sp = sub.add_parser("reminder-add", help="Create a reminder. Requires --apply.")
     sp.add_argument("--title", required=True)

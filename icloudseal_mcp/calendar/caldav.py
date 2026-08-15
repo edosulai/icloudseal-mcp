@@ -176,6 +176,87 @@ def build_reminder(
     return "\r\n".join(lines) + "\r\n"
 
 
+def update_event(
+    text: str,
+    *,
+    summary: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    location: str | None = None,
+    all_day: bool | None = None,
+) -> str:
+    """Patch exposed VEVENT fields without erasing recurrence, alarms, or metadata."""
+    if all(value is None for value in (summary, start, end, location)):
+        raise ValueError("Provide at least one event field to update.")
+
+    stamp = _now_stamp()
+    start_is_date = bool(start and re.fullmatch(r"\d{4}-\d{2}-\d{2}", start.strip()))
+    use_all_day = bool(all_day) or start_is_date
+    replacements: dict[str, str | None] = {
+        "DTSTAMP": f"DTSTAMP:{stamp}",
+        "LAST-MODIFIED": f"LAST-MODIFIED:{stamp}",
+    }
+    if summary is not None:
+        replacements["SUMMARY"] = f"SUMMARY:{summary}"
+    if start is not None:
+        start_param, start_value = _ical_dt(start, all_day=use_all_day)
+        replacements["DTSTART"] = f"DTSTART{start_param}:{start_value}"
+    if end is not None:
+        end_is_date = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", end.strip()))
+        end_param, end_value = _ical_dt(end, all_day=use_all_day or end_is_date)
+        replacements["DTEND"] = f"DTEND{end_param}:{end_value}"
+    if location is not None:
+        replacements["LOCATION"] = f"LOCATION:{location}" if location else None
+
+    emitted: set[str] = set()
+    sequence_emitted = False
+    current_seq = 0
+    in_event = False
+    in_alarm = False
+    output: list[str] = []
+    for line in _unfold(text):
+        upper = line.strip().upper()
+        if upper == "BEGIN:VALARM":
+            in_alarm = True
+            output.append(line)
+            continue
+        if upper == "END:VALARM":
+            in_alarm = False
+            output.append(line)
+            continue
+        if upper == "BEGIN:VEVENT":
+            in_event = True
+            output.append(line)
+            continue
+        if upper == "END:VEVENT":
+            for name, value in replacements.items():
+                if name not in emitted and value is not None:
+                    output.append(value)
+            if not sequence_emitted:
+                output.append(f"SEQUENCE:{current_seq + 1}")
+            in_event = False
+            output.append(line)
+            continue
+        name = line.split(":", 1)[0].split(";", 1)[0].upper()
+        if in_event and not in_alarm and name == "SEQUENCE":
+            try:
+                current_seq = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                current_seq = 0
+            output.append(f"SEQUENCE:{current_seq + 1}")
+            sequence_emitted = True
+            continue
+        if in_event and not in_alarm and name in replacements:
+            if name not in emitted:
+                value = replacements[name]
+                if value is not None:
+                    output.append(value)
+                emitted.add(name)
+            continue
+        output.append(line)
+    return "\r\n".join(output).rstrip("\r\n") + "\r\n"
+
+
 def complete_reminder(text: str) -> str:
     """Mark a VTODO complete without erasing recurrence, alarms, or metadata."""
     stamp = _now_stamp()

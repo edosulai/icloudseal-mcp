@@ -145,9 +145,9 @@ def icloud_list_domains() -> dict[str, Any]:
         "domains": [
             {
                 "id": "mail",
-                "transport": "IMAP + local SQLite cache",
+                "transport": "IMAP + SMTP + local SQLite cache",
                 "reads": ["stats", "sync", "list", "senders", "peek", "triage", "jobs"],
-                "mutations": ["apply plan", "cleanup strict"],
+                "mutations": ["apply plan", "cleanup strict", "send"],
             },
             {
                 "id": "contacts",
@@ -161,6 +161,7 @@ def icloud_list_domains() -> dict[str, Any]:
                 "reads": ["calendars", "events", "reminders"],
                 "mutations": [
                     "event-add",
+                    "event-update",
                     "event-rm",
                     "reminder-add",
                     "reminder-done",
@@ -612,6 +613,42 @@ def icloud_prepare_mail_cleanup_strict(
 
 
 @_tool(
+    "icloud_prepare_mail_send",
+    "Prepare sending an iCloud Mail message via SMTP. From is always the Keychain account. "
+    "No attachments. Show exact recipients/subject/body before Touch ID.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_send(
+    to: list[str] | str,
+    subject: str,
+    body: str,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_mail_send(
+            to=to, subject=subject, body=body, cc=cc, bcc=bcc
+        )
+        recipients = ", ".join(frozen["to"])
+        cc_line = ", ".join(frozen["cc"]) or "(none)"
+        bcc_line = ", ".join(frozen["bcc"]) or "(none)"
+        preview = (
+            f"Send iCloud Mail\nFrom: {frozen['from']}\nTo: {recipients}\n"
+            f"Cc: {cc_line}\nBcc: {bcc_line}\nSubject: {frozen['subject']}\n"
+            f"Body chars: {len(frozen['body'])}\nMessage-ID: {frozen['messageId']}\n"
+            f"Plan SHA-256: {frozen['planSha256']}"
+        )
+        return approval.prepare_action(
+            action="mail.send",
+            target=f"mail:send:{frozen['messageId']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
     "icloud_prepare_contacts_create",
     "Prepare creating an iCloud contact. Show exact fields before Touch ID.",
     PREPARE_ANN,
@@ -774,6 +811,49 @@ def icloud_prepare_event_rm(query: str, days: int = 365) -> dict[str, Any]:
             target=f"event:{target['uid']}",
             preview=preview,
             payload={"target": target},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_event_update",
+    "Prepare updating a calendar event by UID or unique match. "
+    "Only provided fields change; RRULE/VALARM/X-* are preserved.",
+    PREPARE_ANN,
+)
+def icloud_prepare_event_update(
+    query: str,
+    title: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    location: str | None = None,
+    all_day: bool | None = None,
+    days: int = 365,
+) -> dict[str, Any]:
+    try:
+        if all(value is None for value in (title, start, end, location)):
+            raise services.ServiceError("Provide at least one event field to update.")
+        target = services.prepare_event_target(query, days=days)
+        preview = (
+            f"Update calendar event\nTitle: {target['summary']}\nUID: {target['uid']}\n"
+            f"Start: {target['start']}\nEnd: {target['end']}\n"
+            f"Location: {target['location']}\nETag: {target['etag']}\n"
+            f"New title={title}\nNew start={start}\nNew end={end}\n"
+            f"New location={location}\nAll-day: {all_day}"
+        )
+        return approval.prepare_action(
+            action="calendar.event_update",
+            target=f"event:{target['uid']}",
+            preview=preview,
+            payload={
+                "target": target,
+                "title": title,
+                "start": start,
+                "end": end,
+                "location": location,
+                "allDay": all_day,
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

@@ -4,4 +4,4 @@ CLI + MCP surface for Mail, Contacts, Calendar, Messages, Notes, Drive, Photos.
 Sensitive mutations require native macOS approval (Touch ID / password).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -24,10 +24,10 @@ actions without explicit local approval.
 |---|---|---|
 | Metadata / health | `icloud_doctor`, folder counts, domain list | free |
 | Sensitive read | SMS/iMessage bodies, email bodies, full contacts, notes | free over MCP (content enters agent context); FDA/Automation OS gates apply |
-| Externally visible / mutate | send iMessage, create/delete contacts, calendar write, drive rm, mail apply | **prepare preview → explicit chat OK → Touch ID / macOS password** |
+| Externally visible / mutate | send mail, send iMessage, create/delete contacts, calendar write, drive rm, mail apply | **prepare preview → explicit chat OK → Touch ID / macOS password** |
 
 - CLI: dry-run plans + `--apply`.
-- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~49 tools).  
+- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~51 tools).  
   Draft store TTL 10 minutes, single-use; helper `native-approval.swift` compiled to
   `~/Library/Application Support/icloudseal-mcp/bin/native-approval` (mode `0500`).
 - MCP SDK is pinned to the supported major range `mcp>=2,<3`; tool failures use
@@ -43,6 +43,8 @@ Prepare resolves every mutable selector before native approval:
 
 - Mail: canonical embedded plan + SHA-256, exact UIDs/message metadata, and
   mailbox `UIDVALIDITY`; execution rechecks all values in the selected mailbox.
+  SMTP send freezes From/To/Cc/Bcc/subject/body/Message-ID and rehashes before
+  delivery. From is always the Keychain email.
 - Contacts/Calendar: exact href, ETag, UID, and raw vCard/iCalendar document.
   Unknown properties, recurrence, and alarms are preserved on update.
 - Notes: exact Notes.app ID, modified date, body, and body hash.
@@ -65,7 +67,7 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
 
 ## Domains (live CLI + MCP)
 
-1. Mail — IMAP + local SQLite cache
+1. Mail — IMAP + SMTP + local SQLite cache
 2. Contacts — CardDAV
 3. Calendar + Reminders — CalDAV
 4. Messages / SMS — `~/Library/Messages/chat.db` (Full Disk Access)

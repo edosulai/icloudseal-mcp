@@ -8,7 +8,7 @@ Thin layer over `imaplib.IMAP4_SSL` providing:
 - Move/copy/flag operations (used in Phase 2)
 
 iCloud IMAP endpoint: imap.mail.me.com:993 (SSL)
-SMTP endpoint (for Phase 4): smtp.mail.me.com:587 (STARTTLS)
+SMTP send lives in smtp_client.py: smtp.mail.me.com:587 (STARTTLS)
 """
 
 from __future__ import annotations

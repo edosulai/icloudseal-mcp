@@ -25,6 +25,7 @@ from ..contacts.carddav import Contact, ContactsSession
 from ..drive import commands as drive_commands
 from ..mail import cache, cleanup, jobs
 from ..mail.imap_client import open_session
+from ..mail.smtp_client import SMTPError, freeze_send, send_frozen
 from ..messages import chatdb
 from ..messages.chatdb import MessagesAccessError
 from ..notes import applescript
@@ -175,7 +176,7 @@ def doctor() -> dict[str, Any]:
         "email": email,
         "credentials": {"ok": creds_ok, "error": creds_error, "service": auth.SERVICE_NAME},
         "domains": {
-            "mail": {"transport": "IMAP", "ready": creds_ok},
+            "mail": {"transport": "IMAP + SMTP", "ready": creds_ok},
             "contacts": {"transport": "CardDAV", "ready": creds_ok},
             "calendar": {"transport": "CalDAV", "ready": creds_ok},
             "messages": messages,
@@ -675,6 +676,60 @@ def exec_mail_cleanup_strict(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def prepare_mail_send(
+    *,
+    to: list[str] | str,
+    subject: str,
+    body: str,
+    cc: list[str] | str | None = None,
+    bcc: list[str] | str | None = None,
+) -> dict[str, Any]:
+    creds = auth.load_credentials()
+    try:
+        frozen = freeze_send(
+            from_addr=creds.email,
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+        )
+    except SMTPError as exc:
+        raise ServiceError(str(exc)) from exc
+    frozen["planSha256"] = canonical_sha256(
+        {key: frozen[key] for key in ("from", "to", "cc", "bcc", "subject", "body", "messageId")}
+    )
+    return frozen
+
+
+def exec_mail_send(payload: dict[str, Any]) -> dict[str, Any]:
+    expected = payload.get("planSha256")
+    try:
+        frozen = freeze_send(
+            from_addr=payload["from"],
+            to=payload["to"],
+            subject=payload["subject"],
+            body=payload["body"],
+            cc=payload.get("cc"),
+            bcc=payload.get("bcc"),
+            message_id=payload.get("messageId"),
+        )
+    except SMTPError as exc:
+        raise ServiceError(str(exc)) from exc
+    material = {
+        key: frozen[key] for key in ("from", "to", "cc", "bcc", "subject", "body", "messageId")
+    }
+    if not isinstance(expected, str) or canonical_sha256(material) != expected:
+        raise ServiceError("Approved mail send failed its integrity check.")
+    creds = auth.load_credentials()
+    if creds.email != frozen["from"]:
+        raise ServiceError("Keychain From address no longer matches the approved sender.")
+    try:
+        return send_frozen(frozen, password=creds.password)
+    except SMTPError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Contacts
 # ---------------------------------------------------------------------------
@@ -1002,6 +1057,33 @@ def exec_event_rm(payload: dict[str, Any]) -> dict[str, Any]:
         "uid": target.uid,
         "summary": target.summary,
         "start": target.start,
+        "backup": str(backup),
+    }
+
+
+def exec_event_update(payload: dict[str, Any]) -> dict[str, Any]:
+    session = CalendarSession.connect()
+    target = _cal_from_target(payload["target"])
+    try:
+        ics = caldav.update_event(
+            target.raw,
+            summary=payload.get("title"),
+            start=payload.get("start"),
+            end=payload.get("end"),
+            location=payload.get("location"),
+            all_day=payload.get("allDay"),
+        )
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    backup = _backup_cal([target], "event-update")
+    session.update(target, ics)
+    updated = caldav.parse_calitem(ics, "event")
+    return {
+        "uid": target.uid,
+        "summary": updated.summary,
+        "start": updated.start,
+        "end": updated.end,
+        "location": updated.location,
         "backup": str(backup),
     }
 
@@ -1539,11 +1621,13 @@ def register_all_executors() -> None:
 
     approval.register_executor("mail.apply", exec_mail_apply)
     approval.register_executor("mail.cleanup_strict", exec_mail_cleanup_strict)
+    approval.register_executor("mail.send", exec_mail_send)
     approval.register_executor("contacts.create", exec_contacts_create)
     approval.register_executor("contacts.update", exec_contacts_update)
     approval.register_executor("contacts.delete", exec_contacts_delete)
     approval.register_executor("calendar.event_add", exec_event_add)
     approval.register_executor("calendar.event_rm", exec_event_rm)
+    approval.register_executor("calendar.event_update", exec_event_update)
     approval.register_executor("calendar.reminder_add", exec_reminder_add)
     approval.register_executor("calendar.reminder_done", exec_reminder_done)
     approval.register_executor("calendar.reminder_rm", exec_reminder_rm)

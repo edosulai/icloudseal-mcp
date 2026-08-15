@@ -15,8 +15,10 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from icloudseal_mcp.calendar.caldav import complete_reminder
+from icloudseal_mcp import auth
+from icloudseal_mcp.calendar.caldav import complete_reminder, update_event
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
+from icloudseal_mcp.mail.smtp_client import SMTPError, freeze_send, send_frozen
 from icloudseal_mcp.mcp import approval, services
 from icloudseal_mcp.notes import applescript
 from icloudseal_mcp.paths import managed_path
@@ -223,3 +225,124 @@ def test_mcp_failure_sets_is_error_true() -> None:
                     assert result.is_error is True
 
     anyio.run(scenario)
+
+
+def test_freeze_send_rejects_newlines_empty_and_too_many() -> None:
+    with pytest.raises(SMTPError, match="newlines"):
+        freeze_send(
+            from_addr="jane@example.com",
+            to="boss@example.com",
+            subject="Hello\nBcc: evil@example.com",
+            body="Hi",
+        )
+    with pytest.raises(SMTPError, match="empty"):
+        freeze_send(
+            from_addr="jane@example.com",
+            to="boss@example.com",
+            subject="Hello",
+            body="   ",
+        )
+    with pytest.raises(SMTPError, match="Too many recipients"):
+        freeze_send(
+            from_addr="jane@example.com",
+            to=[f"user{i}@example.com" for i in range(21)],
+            subject="Hello",
+            body="Hi",
+        )
+
+
+def test_send_frozen_uses_factory_and_never_opens_a_socket() -> None:
+    frozen = freeze_send(
+        from_addr="jane@example.com",
+        to="boss@example.com",
+        cc="cc@example.com",
+        bcc="bcc@example.com",
+        subject="Hello",
+        body="Hi there",
+        message_id="<test@icloudseal-mcp.local>",
+    )
+    smtp = _FakeSMTP()
+
+    result = send_frozen(frozen, password="app-specific", smtp_factory=lambda: smtp)
+
+    assert smtp.calls == ["ehlo", "starttls", "ehlo", "login", "send_message"]
+    assert smtp.login_args == ("jane@example.com", "app-specific")
+    assert smtp.to_addrs == ["boss@example.com", "cc@example.com", "bcc@example.com"]
+    assert smtp.from_addr == "jane@example.com"
+    assert smtp.message["Subject"] == "Hello"
+    assert smtp.message["Bcc"] is None
+    assert result["recipients"] == 3
+    assert result["messageId"] == "<test@icloudseal-mcp.local>"
+
+
+def test_exec_mail_send_rejects_tampered_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "load_credentials",
+        lambda: auth.Credentials(email="jane@example.com", password="secret"),
+    )
+    frozen = services.prepare_mail_send(
+        to="boss@example.com",
+        subject="Hello",
+        body="Hi there",
+    )
+    frozen["body"] = "Tampered"
+
+    with pytest.raises(services.ServiceError, match="integrity"):
+        services.exec_mail_send(frozen)
+
+
+def test_update_event_preserves_recurrence_and_alarm() -> None:
+    raw = (
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSUMMARY:Standup\r\n"
+        "DTSTART:20260115T090000\r\nDTEND:20260115T093000\r\n"
+        "RRULE:FREQ=WEEKLY\r\nX-CUSTOM:keep\r\nSEQUENCE:2\r\n"
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:ping\r\n"
+        "END:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+
+    updated = update_event(raw, summary="Daily standup", location="Room 2")
+
+    assert "SUMMARY:Daily standup" in updated
+    assert "LOCATION:Room 2" in updated
+    assert "RRULE:FREQ=WEEKLY" in updated
+    assert "X-CUSTOM:keep" in updated
+    assert "BEGIN:VALARM" in updated
+    assert "DESCRIPTION:ping" in updated
+    assert "SEQUENCE:3" in updated
+    assert updated.count("SUMMARY:") == 1
+    with pytest.raises(ValueError, match="at least one"):
+        update_event(raw)
+
+
+class _FakeSMTP:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.login_args: tuple[str, str] | None = None
+        self.message = None
+        self.from_addr = None
+        self.to_addrs: list[str] = []
+
+    def __enter__(self) -> _FakeSMTP:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def ehlo(self) -> None:
+        self.calls.append("ehlo")
+
+    def starttls(self) -> None:
+        self.calls.append("starttls")
+
+    def login(self, username: str, password: str) -> None:
+        self.calls.append("login")
+        self.login_args = (username, password)
+
+    def send_message(self, message, from_addr=None, to_addrs=None) -> None:
+        self.calls.append("send_message")
+        self.message = message
+        self.from_addr = from_addr
+        self.to_addrs = list(to_addrs or [])

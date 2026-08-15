@@ -24,13 +24,13 @@ from .notes import commands as notes_commands
 from .photos import commands as photos_commands
 
 DOMAINS = {
-    "mail": ("iCloud Mail (IMAP): triage, cleanup, job leads.", mail_commands.register),
+    "mail": ("iCloud Mail (IMAP + SMTP): triage, cleanup, gated send.", mail_commands.register),
     "contacts": (
         "iCloud Contacts (CardDAV): list, search, gated CRUD.",
         contacts_commands.register,
     ),
     "calendar": (
-        "iCloud Calendar + Reminders (CalDAV): list, gated add/rm/done.",
+        "iCloud Calendar + Reminders (CalDAV): list, gated add/update/rm/done.",
         calendar_commands.register,
     ),
     "messages": (

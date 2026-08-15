@@ -1,7 +1,8 @@
-"""iCloud Mail (IMAP) commands.
+"""iCloud Mail (IMAP + SMTP) commands.
 
 Read commands gather context; mutating commands go through a dry-run plan and a
-gated ``--apply`` that backs up every message as ``.eml`` before deletion.
+gated ``--apply``. Deletes/moves back up every message as ``.eml`` first.
+Outbound send uses SMTP and never invents a From address.
 
 ``register(subparsers)`` mounts these as subcommands so both the top-level
 ``icloudseal-mcp mail ...`` CLI and the legacy ``mail-agent ...`` CLI can reuse
@@ -26,6 +27,7 @@ from ..common import (
 from ..paths import default_plan_path, now_utc_iso
 from . import cache, cleanup, jobs
 from .imap_client import open_session
+from .smtp_client import SMTPError, freeze_send, send_frozen
 
 # ---- helpers -----------------------------------------------------------
 
@@ -494,6 +496,41 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_send(args: argparse.Namespace) -> int:
+    creds = auth.load_credentials()
+    try:
+        frozen = freeze_send(
+            from_addr=creds.email,
+            to=args.to,
+            subject=args.subject,
+            body=args.body,
+            cc=args.cc,
+            bcc=args.bcc,
+        )
+    except SMTPError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    console.rule("Send mail (dry-run)" if not args.apply else "Send mail")
+    console.print(f"From: {frozen['from']}")
+    console.print(f"To: {', '.join(frozen['to'])}")
+    console.print(f"Cc: {', '.join(frozen['cc']) or '(none)'}")
+    console.print(f"Bcc: {', '.join(frozen['bcc']) or '(none)'}")
+    console.print(f"Subject: {frozen['subject']}")
+    console.print(f"Body chars: {len(frozen['body'])}")
+    console.print(f"Message-ID: {frozen['messageId']}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to send via SMTP.")
+        return 0
+    try:
+        result = send_frozen(frozen, password=creds.password)
+    except SMTPError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(
+        f"[green]Sent[/green] {result['subject']!r} to {result['recipients']} recipient(s)."
+    )
+    return 0
+
+
 # ---- argparse registration ---------------------------------------------
 
 
@@ -583,6 +620,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     collect.add_argument("--out", help="Write review plan JSON")
     collect.add_argument("--json", action="store_true")
     collect.set_defaults(func=cmd_jobs_collect)
+
+    sp = sub.add_parser("send", help="Send a message via iCloud SMTP. Requires --apply.")
+    sp.add_argument("--to", required=True, help="Comma-separated To recipients")
+    sp.add_argument("--subject", required=True)
+    sp.add_argument("--body", required=True)
+    sp.add_argument("--cc", help="Comma-separated Cc recipients")
+    sp.add_argument("--bcc", help="Comma-separated Bcc recipients")
+    sp.add_argument("--apply", action="store_true", help="Actually send the message")
+    sp.set_defaults(func=cmd_send)
 
 
 __all__ = ["register"]

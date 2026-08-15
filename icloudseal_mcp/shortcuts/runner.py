@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 MAX_NAME_LEN = 200
+MAX_INPUT_LEN = 2000
 MAX_LIST = 200
 
 
@@ -64,17 +67,47 @@ def require_named(name: str) -> str:
     return target
 
 
-def run_shortcut(name: str) -> None:
-    """Run one installed shortcut by exact name. No user input is passed."""
+def validate_input(value: str) -> str:
+    """Return frozen shortcut text input. File paths and stdin blobs are refused."""
+    text = (value or "").strip()
+    if not text:
+        raise ShortcutsError("shortcut input is required when provided.")
+    if any(ch in text for ch in "\r\n\x00"):
+        raise ShortcutsError("shortcut input must not contain control characters.")
+    if len(text) > MAX_INPUT_LEN:
+        raise ShortcutsError(f"shortcut input is limited to {MAX_INPUT_LEN} characters.")
+    return text
+
+
+def run_shortcut(name: str, input_text: str | None = None) -> None:
+    """Run one installed shortcut by exact name. Optional text is frozen as argv."""
     target = require_named(name)
-    _run("run", target)
+    if input_text is None:
+        _run("run", target)
+        return
+    frozen = validate_input(input_text)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        prefix="icloudseal-shortcut-",
+        suffix=".txt",
+        delete=False,
+    ) as handle:
+        handle.write(frozen)
+        path = handle.name
+    try:
+        _run("run", target, "--input-path", path)
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 __all__ = [
+    "MAX_INPUT_LEN",
     "MAX_LIST",
     "MAX_NAME_LEN",
     "ShortcutsError",
     "list_shortcuts",
     "require_named",
     "run_shortcut",
+    "validate_input",
 ]

@@ -27,6 +27,9 @@ _BYDAY_RE = re.compile(
 _BYMONTHDAY_RE = re.compile(r"^-?(?:[1-9]|[12]\d|3[01])(?:,-?(?:[1-9]|[12]\d|3[01]))*$")
 _BYMONTH_RE = re.compile(r"^(?:[1-9]|1[0-2])(?:,(?:[1-9]|1[0-2]))*$")
 _ALARM_RE = re.compile(r"^-?P(?=.+)(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$")
+ALLOWED_PARTSTAT = frozenset(
+    {"NEEDS-ACTION", "ACCEPTED", "DECLINED", "TENTATIVE", "DELEGATED"}
+)
 
 ALLOWED_RRULE_FREQ = frozenset({"DAILY", "WEEKLY", "MONTHLY", "YEARLY"})
 ALLOWED_RRULE_KEYS = frozenset(
@@ -202,9 +205,31 @@ def _ical_dt(value: str, *, all_day: bool = False, timezone: str | None = None) 
     return "", dt.strftime("%Y%m%dT%H%M%S")
 
 
-def _attendee_lines(attendees: list[str] | str | None) -> list[str]:
+def validate_partstat(value: str) -> str:
+    token = (value or "").strip().upper()
+    if not token:
+        raise ValueError("partstat is required.")
+    if token not in ALLOWED_PARTSTAT:
+        raise ValueError(
+            "partstat must be NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE, or DELEGATED."
+        )
+    return token
+
+
+def validate_priority(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        raise ValueError("priority must be an integer from 1 to 9.")
+    return value
+
+
+def _attendee_lines(
+    attendees: list[str] | str | None,
+    *,
+    partstat: str | None = None,
+) -> list[str]:
     addresses = normalize_addresses(attendees, field="attendee")
-    return [f"ATTENDEE:mailto:{addr}" for addr in addresses]
+    suffix = f";PARTSTAT={validate_partstat(partstat)}" if partstat else ""
+    return [f"ATTENDEE{suffix}:mailto:{addr}" for addr in addresses]
 
 
 def validate_rrule(value: str) -> str:
@@ -298,6 +323,7 @@ def build_event(
     location: str = "", all_day: bool = False,
     timezone: str | None = None, attendees: list[str] | str | None = None,
     rrule: str | None = None, alarm: str | None = None,
+    partstat: str | None = None,
 ) -> str:
     sp, sv = _ical_dt(start, all_day=all_day, timezone=timezone)
     lines = [
@@ -310,7 +336,7 @@ def build_event(
         lines.append(f"DTEND{ep}:{ev}")
     if location:
         lines.append(f"LOCATION:{location}")
-    lines.extend(_attendee_lines(attendees))
+    lines.extend(_attendee_lines(attendees, partstat=partstat))
     if rrule:
         lines.append(f"RRULE:{validate_rrule(rrule)}")
     if alarm:
@@ -321,6 +347,7 @@ def build_event(
 
 def build_reminder(
     *, uid: str, summary: str, due: str | None = None, completed: bool = False,
+    priority: int | None = None,
 ) -> str:
     lines = [
         "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloudseal-mcp//EN",
@@ -329,6 +356,8 @@ def build_reminder(
     if due:
         dp, dv = _ical_dt(due)
         lines.append(f"DUE{dp}:{dv}")
+    if priority is not None:
+        lines.append(f"PRIORITY:{validate_priority(priority)}")
     if completed:
         lines += ["STATUS:COMPLETED", f"COMPLETED:{_now_stamp()}", "PERCENT-COMPLETE:100"]
     else:
@@ -349,11 +378,14 @@ def update_event(
     attendees: list[str] | str | None = None,
     rrule: str | None = None,
     alarm: str | None = None,
+    partstat: str | None = None,
 ) -> str:
     """Patch exposed VEVENT fields without erasing recurrence, alarms, or metadata."""
     if all(
         value is None
-        for value in (summary, start, end, location, attendees, timezone, rrule, alarm)
+        for value in (
+            summary, start, end, location, attendees, timezone, rrule, alarm, partstat,
+        )
     ):
         raise ValueError("Provide at least one event field to update.")
 
@@ -377,7 +409,12 @@ def update_event(
         replacements["LOCATION"] = f"LOCATION:{location}" if location else None
     if rrule is not None:
         replacements["RRULE"] = f"RRULE:{validate_rrule(rrule)}" if rrule.strip() else None
-    attendee_lines = None if attendees is None else _attendee_lines(attendees)
+    if attendees is not None:
+        attendee_lines = _attendee_lines(attendees, partstat=partstat)
+    elif partstat is not None:
+        raise ValueError("partstat requires attendees.")
+    else:
+        attendee_lines = None
     alarm_lines: list[str] | None
     if alarm is None:
         alarm_lines = None
@@ -450,9 +487,10 @@ def update_reminder(
     *,
     summary: str | None = None,
     due: str | None = None,
+    priority: int | str | None = None,
 ) -> str:
     """Patch exposed VTODO fields without erasing recurrence, alarms, or metadata."""
-    if all(value is None for value in (summary, due)):
+    if all(value is None for value in (summary, due, priority)):
         raise ValueError("Provide at least one reminder field to update.")
 
     stamp = _now_stamp()
@@ -462,6 +500,11 @@ def update_reminder(
     }
     if summary is not None:
         replacements["SUMMARY"] = f"SUMMARY:{summary}"
+    if priority is not None:
+        if isinstance(priority, str) and not priority.strip():
+            replacements["PRIORITY"] = None
+        else:
+            replacements["PRIORITY"] = f"PRIORITY:{validate_priority(int(priority))}"
     if due is not None:
         if due:
             due_param, due_value = _ical_dt(due)

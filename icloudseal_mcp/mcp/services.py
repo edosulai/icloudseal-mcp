@@ -1504,6 +1504,7 @@ def exec_event_add(payload: dict[str, Any]) -> dict[str, Any]:
             attendees=payload.get("attendees"),
             rrule=payload.get("rrule"),
             alarm=payload.get("alarm"),
+            partstat=payload.get("partstat"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -1546,6 +1547,7 @@ def exec_event_update(payload: dict[str, Any]) -> dict[str, Any]:
             attendees=payload.get("attendees"),
             rrule=payload.get("rrule"),
             alarm=payload.get("alarm"),
+            partstat=payload.get("partstat"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -1564,7 +1566,15 @@ def exec_event_update(payload: dict[str, Any]) -> dict[str, Any]:
 
 def exec_reminder_add(payload: dict[str, Any]) -> dict[str, Any]:
     uid = payload["uid"]
-    ics = caldav.build_reminder(uid=uid, summary=payload["title"], due=payload.get("due"))
+    try:
+        ics = caldav.build_reminder(
+            uid=uid,
+            summary=payload["title"],
+            due=payload.get("due"),
+            priority=payload.get("priority"),
+        )
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
     session = CalendarSession.connect()
     collection = payload["collection"]
     href = session.put_item(collection["url"], uid, ics)
@@ -1596,6 +1606,7 @@ def exec_reminder_update(payload: dict[str, Any]) -> dict[str, Any]:
             target.raw,
             summary=payload.get("title"),
             due=payload.get("due"),
+            priority=payload.get("priority"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -2378,6 +2389,40 @@ def exec_photos_album_create(payload: dict[str, Any]) -> dict[str, Any]:
     return {"album": album, "created": True}
 
 
+def prepare_photos_album_remove(filename: str, album: str) -> dict[str, Any]:
+    name = (filename or "").strip()
+    album_name = (album or "").strip()
+    if not name or not album_name:
+        raise ServiceError("filename and album are required.")
+    return {"filename": name, "album": album_name}
+
+
+def exec_photos_album_remove(payload: dict[str, Any]) -> dict[str, Any]:
+    filename = str(payload.get("filename") or "")
+    album = str(payload.get("album") or "")
+    try:
+        photos_script.remove_from_album(filename, album)
+    except PhotosScriptError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"filename": filename, "album": album, "removed": True}
+
+
+def prepare_photos_album_delete(album: str) -> dict[str, Any]:
+    album_name = (album or "").strip()
+    if not album_name:
+        raise ServiceError("album is required.")
+    return {"album": album_name}
+
+
+def exec_photos_album_delete(payload: dict[str, Any]) -> dict[str, Any]:
+    album = str(payload.get("album") or "")
+    try:
+        photos_script.delete_album(album)
+    except PhotosScriptError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"album": album, "deleted": True}
+
+
 def safari_list_tabs() -> list[dict[str, Any]]:
     try:
         tabs = safari_script.list_tabs()
@@ -2604,6 +2649,54 @@ def exec_safari_bookmark_rm(payload: dict[str, Any]) -> dict[str, Any]:
     return {"title": name, "url": canonical, "removed": True}
 
 
+def prepare_safari_reading_list_add(title: str, url: str) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(title)
+        canonical = safari_script.validate_url(url)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical}
+
+
+def exec_safari_reading_list_add(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(str(payload.get("title") or ""))
+        canonical = safari_script.validate_url(str(payload.get("url") or ""))
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if name != payload.get("title") or canonical != payload.get("url"):
+        raise ServiceError("Approved Safari reading list identity changed; refusing to add.")
+    try:
+        safari_script.add_reading_list(name, canonical)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical, "added": True}
+
+
+def prepare_safari_reading_list_rm(title: str, url: str) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(title)
+        canonical = safari_script.validate_url(url)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical}
+
+
+def exec_safari_reading_list_rm(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(str(payload.get("title") or ""))
+        canonical = safari_script.validate_url(str(payload.get("url") or ""))
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if name != payload.get("title") or canonical != payload.get("url"):
+        raise ServiceError("Approved Safari reading list identity changed; refusing to remove.")
+    try:
+        safari_script.remove_reading_list(name, canonical)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical, "removed": True}
+
+
 def shortcuts_list(*, limit: int = 100) -> list[str]:
     try:
         return shortcuts_runner.list_shortcuts(limit=limit)
@@ -2611,12 +2704,15 @@ def shortcuts_list(*, limit: int = 100) -> list[str]:
         raise ServiceError(str(exc)) from exc
 
 
-def prepare_shortcuts_run(name: str) -> dict[str, Any]:
+def prepare_shortcuts_run(name: str, input_text: str | None = None) -> dict[str, Any]:
     try:
         frozen = shortcuts_runner.require_named(name)
+        payload: dict[str, Any] = {"name": frozen}
+        if input_text is not None:
+            payload["input"] = shortcuts_runner.validate_input(input_text)
+        return payload
     except ShortcutsError as exc:
         raise ServiceError(str(exc)) from exc
-    return {"name": frozen}
 
 
 def exec_shortcuts_run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2626,11 +2722,23 @@ def exec_shortcuts_run(payload: dict[str, Any]) -> dict[str, Any]:
         raise ServiceError(str(exc)) from exc
     if frozen != payload.get("name"):
         raise ServiceError("Approved shortcut name changed; refusing to run.")
+    approved_input = payload.get("input")
+    input_text = None
+    if approved_input is not None:
+        try:
+            input_text = shortcuts_runner.validate_input(str(approved_input))
+        except ShortcutsError as exc:
+            raise ServiceError(str(exc)) from exc
+        if input_text != approved_input:
+            raise ServiceError("Approved shortcut input changed; refusing to run.")
     try:
-        shortcuts_runner.run_shortcut(frozen)
+        shortcuts_runner.run_shortcut(frozen, input_text=input_text)
     except ShortcutsError as exc:
         raise ServiceError(str(exc)) from exc
-    return {"name": frozen, "ran": True}
+    result: dict[str, Any] = {"name": frozen, "ran": True}
+    if input_text is not None:
+        result["input"] = input_text
+    return result
 
 
 def safari_page_extract(
@@ -2794,6 +2902,37 @@ def music_search(query: str, *, limit: int = music_script.MAX_SEARCH_RESULTS) ->
     except MusicError as exc:
         raise ServiceError(str(exc)) from exc
     return {"query": query, "count": len(tracks), "tracks": tracks}
+
+
+def music_playlists(*, limit: int = 50) -> list[str]:
+    try:
+        return music_script.list_playlists(limit=limit)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def prepare_music_playlist_play(name: str) -> dict[str, Any]:
+    candidate = (name or "").strip()
+    if not candidate:
+        raise ServiceError("playlist name is required.")
+    if any(ch in candidate for ch in "\r\n\x00"):
+        raise ServiceError("playlist name must not contain control characters.")
+    if len(candidate) > music_script.MAX_SEARCH_LEN:
+        raise ServiceError(
+            f"playlist name is limited to {music_script.MAX_SEARCH_LEN} characters."
+        )
+    return {"name": candidate, "nowPlaying": music_now_playing()}
+
+
+def exec_music_playlist_play(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ServiceError("playlist name is required.")
+    try:
+        music_script.play_playlist(name)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"name": name, "ok": True}
 
 
 def weather_forecast(
@@ -3049,10 +3188,14 @@ def register_all_executors() -> None:
     approval.register_executor("photos.favorite", exec_photos_favorite)
     approval.register_executor("photos.album_add", exec_photos_album_add)
     approval.register_executor("photos.album_create", exec_photos_album_create)
+    approval.register_executor("photos.album_remove", exec_photos_album_remove)
+    approval.register_executor("photos.album_delete", exec_photos_album_delete)
     approval.register_executor("safari.open_url", exec_safari_open_url)
     approval.register_executor("safari.close_tab", exec_safari_close_tab)
     approval.register_executor("safari.bookmark_add", exec_safari_bookmark_add)
     approval.register_executor("safari.bookmark_rm", exec_safari_bookmark_rm)
+    approval.register_executor("safari.reading_list_add", exec_safari_reading_list_add)
+    approval.register_executor("safari.reading_list_rm", exec_safari_reading_list_rm)
     approval.register_executor("shortcuts.run", exec_shortcuts_run)
     approval.register_executor("music.playpause", exec_music_playpause)
     approval.register_executor("music.next", exec_music_next)
@@ -3061,5 +3204,6 @@ def register_all_executors() -> None:
     approval.register_executor("music.shuffle", exec_music_shuffle)
     approval.register_executor("music.repeat", exec_music_repeat)
     approval.register_executor("music.play", exec_music_play)
+    approval.register_executor("music.playlist_play", exec_music_playlist_play)
     approval.register_executor("maps.open", exec_maps_open)
     approval.register_executor("ops.cleanup_agent", exec_ops_cleanup_agent)

@@ -213,6 +213,7 @@ end run"""
 
 RECORD = "\x1e"
 MAX_SEARCH_RESULTS = 20
+MAX_PLAYLISTS = 100
 
 
 def search_tracks(query: str, *, limit: int = MAX_SEARCH_RESULTS) -> list[dict[str, Any]]:
@@ -258,3 +259,47 @@ end run"""
             }
         )
     return rows
+
+
+def list_playlists(*, limit: int = 50) -> list[str]:
+    """Return user-facing Music playlist names. Does not start playback."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PLAYLISTS:
+        raise MusicError(f"limit must be an integer from 1 to {MAX_PLAYLISTS}.")
+    if not music_is_running():
+        raise MusicError("Music is not running.")
+    script = """on run argv
+    set theLimit to item 1 of argv as integer
+    tell application "Music"
+        set theLists to user playlists
+        set output to ""
+        set n to count of theLists
+        if n is 0 then return output
+        if n > theLimit then set n to theLimit
+        repeat with i from 1 to n
+            set output to output & (name of item i of theLists) & "\x1e"
+        end repeat
+        return output
+    end tell
+end run"""
+    raw = _run(script, str(limit))
+    return [name for name in (part.strip() for part in raw.split(RECORD)) if name]
+
+
+def play_playlist(name: str) -> None:
+    """Play one Music playlist by exact name. Name goes through argv only."""
+    candidate = (name or "").strip()
+    if not candidate:
+        raise MusicError("playlist name is required.")
+    if any(ch in candidate for ch in "\r\n\x00"):
+        raise MusicError("playlist name must not contain control characters.")
+    if len(candidate) > MAX_SEARCH_LEN:
+        raise MusicError(f"playlist name is limited to {MAX_SEARCH_LEN} characters.")
+    script = """on run argv
+    set theName to item 1 of argv
+    tell application "Music"
+        set theLists to (every user playlist whose name is theName)
+        if (count of theLists) is 0 then error "No Music playlist with that name"
+        play item 1 of theLists
+    end tell
+end run"""
+    _run(script, candidate)

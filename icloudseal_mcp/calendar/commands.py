@@ -121,7 +121,7 @@ def cmd_event_add(args: argparse.Namespace) -> int:
             uid=uid, summary=args.title, start=args.start, end=args.end,
             location=args.location or "", all_day=args.all_day,
             timezone=args.timezone, attendees=args.attendees,
-            rrule=args.rrule, alarm=args.alarm,
+            rrule=args.rrule, alarm=args.alarm, partstat=args.partstat,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -162,11 +162,12 @@ def cmd_event_update(args: argparse.Namespace) -> int:
             args.timezone,
             args.rrule,
             args.alarm,
+            args.partstat,
         )
     ):
         raise SystemExit(
             "Provide at least one of --title, --start, --end, --location, "
-            "--attendees, --timezone, --rrule, --alarm."
+            "--attendees, --timezone, --rrule, --alarm, --partstat."
         )
     session = CalendarSession.connect()
     target = _resolve_one(session.list_events(days=args.days), args.query)
@@ -182,6 +183,7 @@ def cmd_event_update(args: argparse.Namespace) -> int:
             attendees=args.attendees,
             rrule=args.rrule,
             alarm=args.alarm,
+            partstat=args.partstat,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -201,7 +203,12 @@ def cmd_event_update(args: argparse.Namespace) -> int:
 
 def cmd_reminder_add(args: argparse.Namespace) -> int:
     uid = str(uuid.uuid4()).upper()
-    ics = caldav.build_reminder(uid=uid, summary=args.title, due=args.due)
+    try:
+        ics = caldav.build_reminder(
+            uid=uid, summary=args.title, due=args.due, priority=args.priority,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     console.rule("New reminder (dry-run)")
     console.print(ics)
     if not args.apply:
@@ -243,8 +250,8 @@ def cmd_reminder_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_reminder_update(args: argparse.Namespace) -> int:
-    if args.title is None and args.due is None:
-        raise SystemExit("Provide at least one of --title or --due.")
+    if args.title is None and args.due is None and args.priority is None:
+        raise SystemExit("Provide at least one of --title, --due, or --priority.")
     session = CalendarSession.connect()
     target = _resolve_one(session.list_reminders(include_completed=True), args.query)
     try:
@@ -252,6 +259,7 @@ def cmd_reminder_update(args: argparse.Namespace) -> int:
             target.raw,
             summary=args.title,
             due=args.due,
+            priority=args.priority,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -300,6 +308,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--attendees", help="Comma-separated attendee emails")
     sp.add_argument("--rrule", help="Validated RRULE, e.g. FREQ=WEEKLY;COUNT=8")
     sp.add_argument("--alarm", help="DISPLAY alarm duration, e.g. -PT15M")
+    sp.add_argument(
+        "--partstat",
+        help="ATTENDEE PARTSTAT: NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE, DELEGATED",
+    )
     sp.add_argument("--calendar", help="Target calendar name (default: first)")
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--apply", action="store_true")
@@ -324,6 +336,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--attendees", help="Comma-separated attendee emails")
     sp.add_argument("--rrule", help="Replace RRULE; empty string clears it")
     sp.add_argument("--alarm", help="Replace DISPLAY alarm; empty string clears it")
+    sp.add_argument(
+        "--partstat",
+        help="Replace ATTENDEE PARTSTAT (requires --attendees)",
+    )
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--days", type=int, default=365, help="Search window")
     sp.add_argument("--apply", action="store_true")
@@ -332,6 +348,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("reminder-add", help="Create a reminder. Requires --apply.")
     sp.add_argument("--title", required=True)
     sp.add_argument("--due", help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
+    sp.add_argument("--priority", type=int, help="PRIORITY 1-9 (1 is high)")
     sp.add_argument("--list", help="Target reminder list name (default: first)")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_reminder_add)
@@ -353,6 +370,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("query")
     sp.add_argument("--title")
     sp.add_argument("--due", help="'YYYY-MM-DD', 'YYYY-MM-DD HH:MM', or '' to clear")
+    sp.add_argument(
+        "--priority",
+        help="PRIORITY 1-9, or empty string to clear",
+    )
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_reminder_update)
 

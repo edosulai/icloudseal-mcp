@@ -18,11 +18,14 @@ from mcp.client.stdio import stdio_client
 from icloudseal_mcp import auth
 from icloudseal_mcp.calendar.caldav import (
     build_event,
+    build_reminder,
     complete_reminder,
     list_timezones,
     update_event,
     update_reminder,
     validate_alarm,
+    validate_partstat,
+    validate_priority,
     validate_rrule,
     validate_timezone,
 )
@@ -1340,3 +1343,127 @@ def test_shortcuts_run_uses_exact_name_argv(monkeypatch: pytest.MonkeyPatch) -> 
         shortcuts_runner.require_named("Missing")
     with pytest.raises(shortcuts_runner.ShortcutsError, match="control"):
         shortcuts_runner.require_named("bad\nname")
+
+
+def test_safari_reading_list_mutations_use_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    title = 'Read later" & do shell script "touch /tmp/pwned" & "'
+    url = "https://example.com/later"
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    safari_script.add_reading_list(title, url)
+    safari_script.remove_reading_list(title, url)
+    assert len(calls) == 2
+    for command in calls:
+        assert title not in command[2]
+        assert url not in command[2]
+        assert command[4:] == [title, url]
+    with pytest.raises(safari_script.SafariError, match="control"):
+        safari_script.add_reading_list("bad\ntitle", url)
+    with pytest.raises(safari_script.SafariError, match="http or https"):
+        safari_script.add_reading_list("Later", "javascript:alert(1)")
+
+
+def test_photos_album_remove_and_delete_use_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    photos_script.remove_from_album("IMG_0001.HEIC", "Trip")
+    photos_script.delete_album("Trip")
+    assert calls[0][4:] == ["IMG_0001.HEIC", "Trip"]
+    assert calls[1][4:] == ["Trip"]
+    assert "IMG_0001.HEIC" not in calls[0][2]
+    assert "Trip" not in calls[0][2]
+    assert "Trip" not in calls[1][2]
+    with pytest.raises(photos_script.PhotosScriptError, match="control"):
+        photos_script.remove_from_album("IMG\n1.HEIC", "Trip")
+    with pytest.raises(photos_script.PhotosScriptError, match="control"):
+        photos_script.delete_album("Trip\n2026")
+
+
+def test_partstat_and_priority_are_validated() -> None:
+    assert validate_partstat("accepted") == "ACCEPTED"
+    assert validate_priority(1) == 1
+    ics = build_event(
+        uid="E2",
+        summary="Review",
+        start="2026-04-01 09:00",
+        end="2026-04-01 10:00",
+        attendees="alice@example.com",
+        partstat="ACCEPTED",
+    )
+    assert "ATTENDEE;PARTSTAT=ACCEPTED:mailto:alice@example.com" in ics
+    reminder = build_reminder(uid="R1", summary="Call", priority=3)
+    assert "PRIORITY:3" in reminder
+    replaced = update_event(
+        ics,
+        attendees="bob@example.com",
+        partstat="DECLINED",
+    )
+    assert "ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com" in replaced
+    assert "alice@example.com" not in replaced
+    cleared = update_reminder(reminder, priority="")
+    assert "PRIORITY:" not in cleared
+    kept = update_reminder(reminder, summary="Call back")
+    assert "PRIORITY:3" in kept
+    with pytest.raises(ValueError, match="partstat"):
+        validate_partstat("maybe")
+    with pytest.raises(ValueError, match="priority"):
+        validate_priority(0)
+    with pytest.raises(ValueError, match="priority"):
+        validate_priority(True)
+    with pytest.raises(ValueError, match="partstat requires attendees"):
+        update_event(ics, partstat="TENTATIVE")
+
+
+def test_music_playlist_play_uses_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    name = 'Focus" & do shell script "id"'
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(music_script, "music_is_running", lambda: True)
+    music_script.play_playlist(name)
+    assert calls[0][4:] == [name]
+    assert name not in calls[0][2]
+    with pytest.raises(music_script.MusicError, match="control"):
+        music_script.play_playlist("bad\nname")
+    with pytest.raises(music_script.MusicError, match="required"):
+        music_script.play_playlist("  ")
+
+
+def test_shortcuts_input_uses_temp_file_and_input_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args: str) -> str:
+        calls.append(list(args))
+        if args == ("list",):
+            return "Focus\n"
+        if args[:2] == ("run", "Focus") and args[2:3] == ("--input-path",):
+            path = Path(args[3])
+            assert path.read_text(encoding="utf-8") == "hello"
+            return ""
+        raise shortcuts_runner.ShortcutsError("unexpected")
+
+    monkeypatch.setattr(shortcuts_runner, "_run", fake_run)
+    shortcuts_runner.run_shortcut("Focus", input_text="hello")
+    assert calls[0] == ["list"]
+    assert calls[1][:3] == ["run", "Focus", "--input-path"]
+    assert not Path(calls[1][3]).exists()
+    with pytest.raises(shortcuts_runner.ShortcutsError, match="control"):
+        shortcuts_runner.validate_input("bad\ninput")
+    with pytest.raises(shortcuts_runner.ShortcutsError, match="required"):
+        shortcuts_runner.validate_input("   ")

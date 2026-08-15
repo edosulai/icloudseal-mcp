@@ -11,21 +11,21 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 > **Status — fourteen domains live (CLI + MCP)**
 > - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), forward, flags, move, trash, and create-folder.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
-> - **Calendar + Reminders (CalDAV)** — list/timezones plus gated add/update/rm/done with ATTENDEE/TZID and validated RRULE/VALARM.
+> - **Calendar + Reminders (CalDAV)** — list/timezones plus gated add/update/rm/done with ATTENDEE PARTSTAT, reminder PRIORITY, TZID, and validated RRULE/VALARM.
 > - **Messages / SMS** — read `chat.db` plus gated AppleScript send (optional file attach).
 > - **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create (account picker)/update/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated mkdir/put/rm/rename/move/copy (rm → Trash).
-> - **Photos** — stats/albums/list plus gated export, favorite, album-add, and album-create. Import is not implemented.
-> - **Safari (AppleScript + FDA store)** — tabs/current/page-text/extract plus bookmarks/history reads. Gated http(s) open, search, close-tab, and bookmarks-bar add/rm.
-> - **Music (AppleScript)** — now-playing plus library search (names only). Gated playpause/next/previous, volume, shuffle, repeat, play-by-name.
+> - **Photos** — stats/albums/list plus gated export, favorite, album-add/create/remove/delete. Import is not implemented.
+> - **Safari (AppleScript + FDA store)** — tabs/current/page-text/extract plus bookmarks/history reads. Gated http(s) open, search, close-tab, bookmarks-bar add/rm, and Reading List add/rm.
+> - **Music (AppleScript)** — now-playing plus library/playlist search (names only). Gated playpause/next/previous, volume, shuffle, repeat, play-by-name, playlist-play.
 > - **Weather (Open-Meteo)** — current plus daily forecast; hourly and 15-minute rows are opt-in.
 > - **Maps (maps.apple.com)** — local search/directions URL plus gated open (optional zoom/type).
 > - **Health** — status only. Fail-closed until a signed HealthKit helper exists. Does not scrape Health.app.
 > - **Ops** — write a mail-cleanup LaunchAgent plist. Does not `launchctl load`.
-> - **Shortcuts** — list installed shortcuts plus gated run by exact name (no input).
+> - **Shortcuts** — list installed shortcuts plus gated run by exact name (optional frozen text input).
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~97 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~105 tools).
 
 ## Seal family & security model
 
@@ -87,18 +87,18 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
 | Mail | stats/sync/list/senders/peek/triage/jobs/attachments + prepare apply/cleanup/send/forward/flags/move/trash/create-folder |
 | Contacts | list/search/export + prepare create/update/delete |
-| Calendar | list/events/reminders/timezones + prepare event add/update/rm and reminder mutations (RRULE/VALARM) |
+| Calendar | list/events/reminders/timezones + prepare event add/update/rm and reminder mutations (RRULE/VALARM/PARTSTAT/PRIORITY) |
 | Messages | chats/list/search/export + prepare send (optional attach) |
 | Notes | list/search/read/accounts/folders + prepare create/update/delete |
 | Drive | ls/tree/find/read + prepare mkdir/put/rm/rename/move/copy |
-| Photos | stats/albums/list + prepare export/favorite/album-add/album-create |
-| Safari | tabs/current/page-text/extract/bookmarks/history + prepare open-url/search/close-tab/bookmark-add/rm |
-| Music | now-playing/search + prepare playpause/next/previous/volume/shuffle/repeat/play |
+| Photos | stats/albums/list + prepare export/favorite/album-add/create/remove/delete |
+| Safari | tabs/current/page-text/extract/bookmarks/history + prepare open-url/search/close-tab/bookmark-add/rm/reading-list-add/rm |
+| Music | now-playing/search/playlists + prepare playpause/next/previous/volume/shuffle/repeat/play/playlist-play |
 | Weather | forecast (Open-Meteo current+daily; hourly/minutely opt-in) |
 | Maps | search URL + prepare open (optional zoom/type) |
 | Health | status only (fail-closed) |
 | Ops | prepare cleanup-agent (write plist only) |
-| Shortcuts | list + prepare run (exact name, no input) |
+| Shortcuts | list + prepare run (exact name, optional frozen text input) |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
 ## Architecture
@@ -208,11 +208,11 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 | `timezones [--query] [--limit] [--json]` | IANA-like TZIDs for event create/update |
 | `events [--days 30] [--json]` | Upcoming events |
 | `reminders [--all] [--json]` | Reminders (open by default) |
-| `event-add --title --start [--end --location --calendar --all-day --timezone --attendees --rrule --alarm] [--apply]` | Create event |
-| `event-update <query> [--title --start --end --location --all-day --timezone --attendees --rrule --alarm] [--apply]` | Patch event (omit RRULE/VALARM to keep; empty string clears; `.ics` backed up) |
+| `event-add --title --start [--end --location --calendar --all-day --timezone --attendees --partstat --rrule --alarm] [--apply]` | Create event |
+| `event-update <query> [--title --start --end --location --all-day --timezone --attendees --partstat --rrule --alarm] [--apply]` | Patch event (omit RRULE/VALARM to keep; empty string clears; `--partstat` needs `--attendees`; `.ics` backed up) |
 | `event-rm <query> [--apply]` | Delete event (`.ics` backed up) |
-| `reminder-add --title [--due --list] [--apply]` | Create reminder |
-| `reminder-update <query> [--title --due] [--apply]` | Patch reminder (RRULE/VALARM kept; empty `--due` clears it) |
+| `reminder-add --title [--due --priority --list] [--apply]` | Create reminder |
+| `reminder-update <query> [--title --due --priority] [--apply]` | Patch reminder (RRULE/VALARM kept; empty `--due`/`--priority` clears) |
 | `reminder-done <query> [--apply]` | Mark reminder complete |
 | `reminder-rm <query> [--apply]` | Delete reminder (`.ics` backed up) |
 
@@ -271,7 +271,9 @@ downloaded and reports the rest.
 | `export <dir> [--album --kind --favorites] [--apply]` | Copy locally-downloaded originals out |
 | `favorite --filename <name> [--unfavorite] [--apply]` | Favorite or unfavorite by filename |
 | `album-add --filename <name> --album <name> [--apply]` | Add an existing photo to an album. Import is not implemented. |
-| `album-create --title <name> [--apply]` | Create an empty album (refuses an existing title) |
+| `album-create --album <name> [--apply]` | Create an empty album (refuses an existing title) |
+| `album-remove --filename <name> --album <name> [--apply]` | Remove one photo from an album (does not delete the asset) |
+| `album-delete --album <name> [--apply]` | Delete an album (photos stay in the library) |
 
 ## Safari commands (`icloudseal-mcp safari …`)
 
@@ -292,6 +294,8 @@ Only `http` / `https` URLs are accepted — no implicit `https://` prefix, no
 | `close --window N --tab N [--apply]` | Close a frozen tab after snapshotting name + URL |
 | `bookmark-add --title --url [--apply]` | Add a bookmarks-bar item |
 | `bookmark-rm --title --url [--apply]` | Remove a bookmarks-bar item by frozen title+URL |
+| `reading-list-add --title --url [--apply]` | Add a Reading List item |
+| `reading-list-rm --title --url [--apply]` | Remove a Reading List item by frozen title+URL |
 
 ## Music commands (`icloudseal-mcp music …`)
 
@@ -302,6 +306,7 @@ AirPlay is not exposed.
 |---|---|
 | `now [--json]` | Now-playing (state/name/artist/album); `stopped` if Music is not running |
 | `search --query <name> [--limit] [--json]` | Library search (names only; does not play) |
+| `playlists [--limit] [--json]` | User playlist names (does not play) |
 | `playpause [--apply]` | Toggle play/pause |
 | `next [--apply]` | Skip to the next track |
 | `previous [--apply]` | Skip to the previous track |
@@ -309,6 +314,7 @@ AirPlay is not exposed.
 | `shuffle --mode off\|songs\|albums\|groupings [--apply]` | Set shuffle mode |
 | `repeat --mode off\|one\|all [--apply]` | Set repeat mode |
 | `play --query <name> [--apply]` | Search the library and play the first match |
+| `playlist-play --name <name> [--apply]` | Play a playlist by exact name |
 
 ## Weather commands (`icloudseal-mcp weather …`)
 
@@ -432,12 +438,13 @@ Writes a LaunchAgent plist. Does **not** `launchctl load`.
 ## Shortcuts commands (`icloudseal-mcp shortcuts …`)
 
 List is a read. Running a shortcut is dry-run unless `--apply`. The exact
-installed name is frozen; no shortcut input is accepted.
+installed name is frozen. Optional text input is frozen and passed via
+`--input-path` (no user file paths or stdin blobs).
 
 | Command | Action |
 |---|---|
 | `list [--limit] [--json]` | Installed Shortcut names |
-| `run <name> [--apply]` | Run one installed Shortcut by exact name |
+| `run <name> [--input] [--apply]` | Run one installed Shortcut by exact name |
 
 ## Roadmap
 

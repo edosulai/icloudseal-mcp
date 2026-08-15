@@ -84,3 +84,36 @@ def create_album(album: str) -> None:
     end tell
 end run"""
     _run(script, album_name)
+
+
+def remove_from_album(filename: str, album: str) -> None:
+    """Remove the first matching media item from a named album. Does not delete the asset."""
+    name = _clean_name(filename, "filename")
+    album_name = _clean_name(album, "album")
+    script = """on run argv
+    set theName to item 1 of argv
+    set albumName to item 2 of argv
+    tell application "Photos"
+        set theAlbums to (every album whose name is albumName)
+        if (count of theAlbums) is 0 then error "No Photos album with that name"
+        set theAlbum to item 1 of theAlbums
+        set theItems to (every media item of theAlbum whose filename is theName)
+        if (count of theItems) is 0 then error "No Photos item with that filename in the album"
+        remove {item 1 of theItems} from theAlbum
+    end tell
+end run"""
+    _run(script, name, album_name)
+
+
+def delete_album(album: str) -> None:
+    """Delete an existing Photos album by title. Photos stay in the library."""
+    album_name = _clean_name(album, "album")
+    script = """on run argv
+    set albumName to item 1 of argv
+    tell application "Photos"
+        set theAlbums to (every album whose name is albumName)
+        if (count of theAlbums) is 0 then error "No Photos album with that name"
+        delete item 1 of theAlbums
+    end tell
+end run"""
+    _run(script, album_name)

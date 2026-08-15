@@ -234,6 +234,36 @@ end run"""
     _run(script, name, canonical)
 
 
+def add_reading_list(title: str, url: str) -> None:
+    """Add one Reading List item. Title and URL go through argv only."""
+    name = validate_bookmark_title(title)
+    canonical = validate_url(url)
+    script = """on run argv
+    set theName to item 1 of argv
+    set theURL to item 2 of argv
+    tell application "Safari"
+        add reading list item theURL with title theName
+    end tell
+end run"""
+    _run(script, name, canonical)
+
+
+def remove_reading_list(title: str, url: str) -> None:
+    """Delete the first Reading List item whose frozen title+URL still match."""
+    name = validate_bookmark_title(title)
+    canonical = validate_url(url)
+    script = """on run argv
+    set theName to item 1 of argv
+    set theURL to item 2 of argv
+    tell application "Safari"
+        set theItems to (every reading list item whose name is theName and URL is theURL)
+        if (count of theItems) is 0 then error "No Safari reading list item with that title and URL"
+        delete item 1 of theItems
+    end tell
+end run"""
+    _run(script, name, canonical)
+
+
 def page_text(
     *,
     window_index: int,

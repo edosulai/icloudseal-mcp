@@ -842,6 +842,20 @@ def icloud_music_search(query: str, limit: int = 20) -> dict[str, Any]:
         return _err(exc)
 
 
+@_tool(
+    "icloud_music_playlists",
+    "List Music.app user playlist names. Never plays a playlist. "
+    "Fails if Music is not running. Does not launch Music.",
+    READ_ANN,
+)
+def icloud_music_playlists(limit: int = 50) -> dict[str, Any]:
+    try:
+        names = services.music_playlists(limit=limit)
+        return {"count": len(names), "playlists": names}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # ---------------------------------------------------------------------------
 # Shortcuts reads
 # ---------------------------------------------------------------------------
@@ -1347,6 +1361,7 @@ def icloud_prepare_event_add(
     attendees: list[str] | str | None = None,
     rrule: str | None = None,
     alarm: str | None = None,
+    partstat: str | None = None,
 ) -> dict[str, Any]:
     try:
         collection = services.prepare_calendar_collection(calendar, events=True)
@@ -1357,6 +1372,7 @@ def icloud_prepare_event_add(
             f"Location: {location or ''}\nCalendar: {calendar or '(default)'}\n"
             f"All-day: {all_day}\nTimezone: {timezone or '(floating/UTC)'}\n"
             f"Attendees: {attendee_line or '(none)'}\n"
+            f"PARTSTAT: {partstat or '(none)'}\n"
             f"RRULE: {rrule or '(none)'}\nAlarm: {alarm or '(none)'}"
         )
         return approval.prepare_action(
@@ -1374,6 +1390,7 @@ def icloud_prepare_event_add(
                 "attendees": attendees,
                 "rrule": rrule,
                 "alarm": alarm,
+                "partstat": partstat,
                 "collection": collection,
                 "uid": uid,
             },
@@ -1421,12 +1438,23 @@ def icloud_prepare_event_update(
     attendees: list[str] | str | None = None,
     rrule: str | None = None,
     alarm: str | None = None,
+    partstat: str | None = None,
     days: int = 365,
 ) -> dict[str, Any]:
     try:
         if all(
             value is None
-            for value in (title, start, end, location, timezone, attendees, rrule, alarm)
+            for value in (
+                title,
+                start,
+                end,
+                location,
+                timezone,
+                attendees,
+                rrule,
+                alarm,
+                partstat,
+            )
         ):
             raise services.ServiceError("Provide at least one event field to update.")
         target = services.prepare_event_target(query, days=days)
@@ -1438,6 +1466,7 @@ def icloud_prepare_event_update(
             f"New title={title}\nNew start={start}\nNew end={end}\n"
             f"New location={location}\nAll-day: {all_day}\n"
             f"New timezone={timezone}\nNew attendees={attendee_line or '(unchanged)'}\n"
+            f"New PARTSTAT={partstat if partstat is not None else '(unchanged)'}\n"
             f"New RRULE={rrule if rrule is not None else '(unchanged)'}\n"
             f"New alarm={alarm if alarm is not None else '(unchanged)'}"
         )
@@ -1456,6 +1485,7 @@ def icloud_prepare_event_update(
                 "attendees": attendees,
                 "rrule": rrule,
                 "alarm": alarm,
+                "partstat": partstat,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -1464,7 +1494,10 @@ def icloud_prepare_event_update(
 
 @_tool("icloud_prepare_reminder_add", "Prepare creating a reminder.", PREPARE_ANN)
 def icloud_prepare_reminder_add(
-    title: str, due: str | None = None, reminder_list: str | None = None
+    title: str,
+    due: str | None = None,
+    reminder_list: str | None = None,
+    priority: int | None = None,
 ) -> dict[str, Any]:
     try:
         collection = services.prepare_calendar_collection(
@@ -1474,13 +1507,20 @@ def icloud_prepare_reminder_add(
         uid = services.new_resource_uid()
         preview = (
             f"Create reminder\nUID: {uid}\nTitle: {title}\nDue: {due or ''}\n"
+            f"Priority: {priority if priority is not None else '(none)'}\n"
             f"List: {reminder_list or '(default)'}"
         )
         return approval.prepare_action(
             action="calendar.reminder_add",
             target=f"reminder:{uid}",
             preview=preview,
-            payload={"uid": uid, "title": title, "due": due, "collection": collection},
+            payload={
+                "uid": uid,
+                "title": title,
+                "due": due,
+                "priority": priority,
+                "collection": collection,
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1533,21 +1573,30 @@ def icloud_prepare_reminder_update(
     query: str,
     title: str | None = None,
     due: str | None = None,
+    priority: str | None = None,
 ) -> dict[str, Any]:
     try:
-        if title is None and due is None:
-            raise services.ServiceError("Provide at least one of title or due to update.")
+        if title is None and due is None and priority is None:
+            raise services.ServiceError(
+                "Provide at least one of title, due, or priority to update."
+            )
         target = services.prepare_reminder_target(query)
         preview = (
             f"Update reminder\nTitle: {target['summary']}\nUID: {target['uid']}\n"
             f"Due: {target.get('start') or '(none)'}\nETag: {target['etag']}\n"
-            f"New title={title}\nNew due={due}"
+            f"New title={title}\nNew due={due}\n"
+            f"New priority={priority if priority is not None else '(unchanged)'}"
         )
         return approval.prepare_action(
             action="calendar.reminder_update",
             target=f"reminder:{target['uid']}",
             preview=preview,
-            payload={"target": target, "title": title, "due": due},
+            payload={
+                "target": target,
+                "title": title,
+                "due": due,
+                "priority": priority,
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1923,6 +1972,52 @@ def icloud_prepare_photos_album_create(album: str) -> dict[str, Any]:
 
 
 @_tool(
+    "icloud_prepare_photos_album_remove",
+    "Prepare removing one Photos asset from an album by filename. "
+    "Does not delete the photo itself.",
+    PREPARE_ANN,
+)
+def icloud_prepare_photos_album_remove(filename: str, album: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_photos_album_remove(filename, album)
+        preview = (
+            f"Remove Photos asset from album\nFilename: {frozen['filename']}\n"
+            f"Album: {frozen['album']}\nDoes not delete the asset."
+        )
+        return approval.prepare_action(
+            action="photos.album_remove",
+            target=f"photos:{frozen['filename']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_photos_album_delete",
+    "Prepare deleting an empty or existing Photos album by title. "
+    "Does not delete photos inside the album.",
+    PREPARE_ANN,
+)
+def icloud_prepare_photos_album_delete(album: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_photos_album_delete(album)
+        preview = (
+            f"Delete Photos album\nAlbum: {frozen['album']}\n"
+            "Does not delete the photos that were in it."
+        )
+        return approval.prepare_action(
+            action="photos.album_delete",
+            target=f"photos:album:{frozen['album']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
     "icloud_prepare_safari_open_url",
     "Prepare opening an http(s) URL in Safari (new tab or new window). "
     "Rejects javascript:/file:/data: and URLs without an explicit scheme.",
@@ -2042,17 +2137,69 @@ def icloud_prepare_safari_bookmark_rm(title: str, url: str) -> dict[str, Any]:
 
 
 @_tool(
-    "icloud_prepare_shortcuts_run",
-    "Prepare running one installed Shortcut by exact name. "
-    "Does not pass input. Fails if the name is missing.",
+    "icloud_prepare_safari_reading_list_add",
+    "Prepare adding a Safari Reading List item. Title and http(s) URL are frozen.",
     PREPARE_ANN,
 )
-def icloud_prepare_shortcuts_run(name: str) -> dict[str, Any]:
+def icloud_prepare_safari_reading_list_add(title: str, url: str) -> dict[str, Any]:
     try:
-        frozen = services.prepare_shortcuts_run(name)
+        frozen = services.prepare_safari_reading_list_add(title, url)
         preview = (
-            f"Run Shortcut\nName: {frozen['name']}\n"
-            "No input is passed. Only the frozen installed name will run."
+            f"Add Safari Reading List item\nTitle: {frozen['title']}\n"
+            f"URL: {frozen['url']}"
+        )
+        return approval.prepare_action(
+            action="safari.reading_list_add",
+            target=f"safari:reading-list:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_reading_list_rm",
+    "Prepare removing one Safari Reading List item by frozen title+URL.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_reading_list_rm(title: str, url: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_reading_list_rm(title, url)
+        preview = (
+            f"Remove Safari Reading List item\nTitle: {frozen['title']}\n"
+            f"URL: {frozen['url']}"
+        )
+        return approval.prepare_action(
+            action="safari.reading_list_rm",
+            target=f"safari:reading-list:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_shortcuts_run",
+    "Prepare running one installed Shortcut by exact name. "
+    "Optional text input is frozen and passed via --input-path. "
+    "Fails if the name is missing.",
+    PREPARE_ANN,
+)
+def icloud_prepare_shortcuts_run(
+    name: str, input: str | None = None
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_shortcuts_run(name, input_text=input)
+        extra = (
+            f"Input: {frozen['input']}"
+            if frozen.get("input") is not None
+            else "No input is passed."
+        )
+        preview = (
+            f"Run Shortcut\nName: {frozen['name']}\n{extra}\n"
+            "Only the frozen installed name will run."
         )
         return approval.prepare_action(
             action="shortcuts.run",
@@ -2189,6 +2336,30 @@ def icloud_prepare_music_play(query: str) -> dict[str, Any]:
         return approval.prepare_action(
             action="music.play",
             target=f"music:play:{frozen['query']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_playlist_play",
+    "Prepare playing a Music.app playlist by exact name. Name is frozen as argv.",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_playlist_play(name: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_music_playlist_play(name)
+        now = frozen["nowPlaying"]
+        now_line = now.get("name") or now.get("state") or "stopped"
+        preview = (
+            f"Play Music playlist\nName: {frozen['name']}\n"
+            f"Now playing: {now_line}"
+        )
+        return approval.prepare_action(
+            action="music.playlist_play",
+            target=f"music:playlist:{frozen['name']}",
             preview=preview,
             payload=frozen,
         )

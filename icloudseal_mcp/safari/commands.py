@@ -283,6 +283,52 @@ def cmd_bookmark_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reading_list_add(args: argparse.Namespace) -> int:
+    try:
+        title = applescript.validate_bookmark_title(args.title)
+        url = applescript.validate_url(args.url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.rule("Add Safari Reading List" if args.apply else "Add Safari Reading List (dry-run)")
+    console.print(f"Title: {title}")
+    console.print(f"URL: {url}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to add the Reading List item.")
+        return 0
+    try:
+        applescript.add_reading_list(title, url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Added Reading List item[/green] {title}")
+    return 0
+
+
+def cmd_reading_list_rm(args: argparse.Namespace) -> int:
+    try:
+        title = applescript.validate_bookmark_title(args.title)
+        url = applescript.validate_url(args.url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.rule(
+        "Remove Safari Reading List" if args.apply else "Remove Safari Reading List (dry-run)"
+    )
+    console.print(f"Title: {title}")
+    console.print(f"URL: {url}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to remove the Reading List item.")
+        return 0
+    try:
+        applescript.remove_reading_list(title, url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Removed Reading List item[/green] {title}")
+    return 0
+
+
 def cmd_bookmark_rm(args: argparse.Namespace) -> int:
     try:
         title = applescript.validate_bookmark_title(args.title)
@@ -427,6 +473,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--url", required=True)
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_bookmark_rm)
+
+    sp = sub.add_parser("reading-list-add", help="Add a Reading List item. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--url", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reading_list_add)
+
+    sp = sub.add_parser("reading-list-rm", help="Remove a Reading List item. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--url", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reading_list_rm)
 
 
 __all__ = ["register"]

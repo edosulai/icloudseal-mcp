@@ -47,12 +47,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     except ShortcutsError as exc:
         console.print(f"[red]Shortcuts error:[/red] {exc}")
         return 2
+    try:
+        input_text = runner.validate_input(args.input) if args.input is not None else None
+    except ShortcutsError as exc:
+        console.print(f"[red]Shortcuts error:[/red] {exc}")
+        return 2
     console.rule("Shortcuts run" if args.apply else "Shortcuts run (dry-run)")
     console.print(f"Name: {name}")
+    if input_text is not None:
+        console.print(f"Input: {input_text}")
     if not args.apply:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to run this shortcut.")
         return 0
-    if _guard(lambda: runner.run_shortcut(name)) is None:
+    if _guard(lambda: runner.run_shortcut(name, input_text=input_text)) is None:
         return 2
     console.print(f"[green]Ran[/green] {name}")
     return 0
@@ -66,6 +73,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     sp = sub.add_parser("run", help="Run one Shortcut by exact name. Requires --apply.")
     sp.add_argument("name")
+    sp.add_argument("--input", help="Optional frozen text input (no files or stdin blobs).")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_run)
 

@@ -156,6 +156,37 @@ def cmd_album_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_album_remove(args: argparse.Namespace) -> int:
+    console.rule("Photos album-remove" if args.apply else "Photos album-remove (dry-run)")
+    console.print(f"Filename: {args.filename}")
+    console.print(f"Album: {args.album}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to remove the item from the album.")
+        return 0
+    try:
+        applescript.remove_from_album(args.filename, args.album)
+    except PhotosScriptError as exc:
+        console.print(f"[red]Photos error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Removed[/green] {args.filename} from {args.album}")
+    return 0
+
+
+def cmd_album_delete(args: argparse.Namespace) -> int:
+    console.rule("Photos album-delete" if args.apply else "Photos album-delete (dry-run)")
+    console.print(f"Album: {args.album}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to delete the album.")
+        return 0
+    try:
+        applescript.delete_album(args.album)
+    except PhotosScriptError as exc:
+        console.print(f"[red]Photos error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Deleted album[/green] {args.album}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("stats", help="Library totals (photos/videos/favorites/albums).")
     sp.add_argument("--json", action="store_true")
@@ -207,6 +238,23 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--album", required=True)
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_album_create)
+
+    sp = sub.add_parser(
+        "album-remove",
+        help="Remove a Photos item from an album by filename. Requires --apply.",
+    )
+    sp.add_argument("--filename", required=True)
+    sp.add_argument("--album", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_album_remove)
+
+    sp = sub.add_parser(
+        "album-delete",
+        help="Delete a Photos album by title. Photos stay in the library. Requires --apply.",
+    )
+    sp.add_argument("--album", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_album_delete)
 
 
 __all__ = ["register"]

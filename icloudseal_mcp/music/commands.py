@@ -135,6 +135,33 @@ def cmd_repeat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_playlists(args: argparse.Namespace) -> int:
+    names = _guard(lambda: applescript.list_playlists(limit=args.limit))
+    if names is None:
+        return 2
+    if args.json:
+        print(json.dumps({"count": len(names), "playlists": names}, indent=2))
+        return 0
+    if not names:
+        console.print("[dim]No Music playlists found.[/dim]")
+        return 0
+    for name in names:
+        console.print(name)
+    return 0
+
+
+def cmd_playlist_play(args: argparse.Namespace) -> int:
+    console.rule("Music playlist-play" if args.apply else "Music playlist-play (dry-run)")
+    console.print(f"Playlist: {args.name}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to play the playlist.")
+        return 0
+    if _guard(lambda: applescript.play_playlist(args.name)) is None:
+        return 2
+    console.print(f"[green]Playing playlist[/green] {args.name}")
+    return 0
+
+
 def cmd_play(args: argparse.Namespace) -> int:
     console.rule("Music play" if args.apply else "Music play (dry-run)")
     console.print(f"Query: {args.query}")
@@ -192,6 +219,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--query", required=True)
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_play)
+
+    sp = sub.add_parser("playlists", help="List Music.app user playlists (does not play).")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_playlists)
+
+    sp = sub.add_parser("playlist-play", help="Play a Music.app playlist by exact name. Requires --apply.")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_playlist_play)
 
 
 __all__ = ["register"]

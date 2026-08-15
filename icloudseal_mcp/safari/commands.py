@@ -11,8 +11,9 @@ import json
 from rich.table import Table
 
 from ..common import console
-from . import applescript
+from . import applescript, store
 from .applescript import SafariError, SafariTab
+from .store import SafariStoreError
 
 
 def _guard(fn):
@@ -215,6 +216,95 @@ def cmd_source(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bookmarks(args: argparse.Namespace) -> int:
+    reading_list = True if args.reading_list else None
+    try:
+        items = store.list_bookmarks(reading_list=reading_list, limit=args.limit)
+    except SafariStoreError as exc:
+        console.print(f"[red]Safari store:[/red] {exc}")
+        return 2
+    if args.json:
+        print(json.dumps([item.to_dict() for item in items], indent=2))
+        return 0
+    if not items:
+        console.print("[dim]No Safari bookmarks found.[/dim]")
+        return 0
+    table = Table(title=f"Safari bookmarks ({len(items)})")
+    table.add_column("Folder")
+    table.add_column("Title")
+    table.add_column("URL", style="dim")
+    for item in items:
+        table.add_row(item.folder[:40], item.title[:50], item.url[:80])
+    console.print(table)
+    return 0
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    try:
+        items = store.list_history(limit=args.limit)
+    except SafariStoreError as exc:
+        console.print(f"[red]Safari store:[/red] {exc}")
+        return 2
+    if args.json:
+        print(json.dumps([item.to_dict() for item in items], indent=2))
+        return 0
+    if not items:
+        console.print("[dim]No Safari history found.[/dim]")
+        return 0
+    table = Table(title=f"Safari history ({len(items)})")
+    table.add_column("Visited")
+    table.add_column("Title")
+    table.add_column("URL", style="dim")
+    for item in items:
+        table.add_row(item.visited_at[:19], item.title[:50], item.url[:80])
+    console.print(table)
+    return 0
+
+
+def cmd_bookmark_add(args: argparse.Namespace) -> int:
+    try:
+        title = applescript.validate_bookmark_title(args.title)
+        url = applescript.validate_url(args.url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.rule("Add Safari bookmark" if args.apply else "Add Safari bookmark (dry-run)")
+    console.print(f"Title: {title}")
+    console.print(f"URL: {url}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to add the bookmark.")
+        return 0
+    try:
+        applescript.add_bookmark(title, url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Added bookmark[/green] {title}")
+    return 0
+
+
+def cmd_bookmark_rm(args: argparse.Namespace) -> int:
+    try:
+        title = applescript.validate_bookmark_title(args.title)
+        url = applescript.validate_url(args.url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.rule("Remove Safari bookmark" if args.apply else "Remove Safari bookmark (dry-run)")
+    console.print(f"Title: {title}")
+    console.print(f"URL: {url}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to remove the bookmark.")
+        return 0
+    try:
+        applescript.remove_bookmark(title, url)
+    except SafariError as exc:
+        console.print(f"[red]Safari error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Removed bookmark[/green] {title}")
+    return 0
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     tabs = _guard(applescript.list_tabs)
     if tabs is None:
@@ -314,6 +404,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_extract)
+
+    sp = sub.add_parser("bookmarks", help="List Safari bookmarks (needs Full Disk Access).")
+    sp.add_argument("--reading-list", action="store_true")
+    sp.add_argument("--limit", type=int, default=200)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_bookmarks)
+
+    sp = sub.add_parser("history", help="List recent Safari history (read-only, needs FDA).")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_history)
+
+    sp = sub.add_parser("bookmark-add", help="Add a bookmarks-bar item. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--url", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_bookmark_add)
+
+    sp = sub.add_parser("bookmark-rm", help="Remove a bookmarks-bar item. Requires --apply.")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--url", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_bookmark_rm)
 
 
 __all__ = ["register"]

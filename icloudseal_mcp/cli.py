@@ -27,6 +27,7 @@ from .notes import commands as notes_commands
 from .ops import commands as ops_commands
 from .photos import commands as photos_commands
 from .safari import commands as safari_commands
+from .shortcuts import commands as shortcuts_commands
 from .weather import commands as weather_commands
 
 DOMAINS = {
@@ -39,7 +40,7 @@ DOMAINS = {
         contacts_commands.register,
     ),
     "calendar": (
-        "iCloud Calendar + Reminders (CalDAV): list/timezones, gated add/update/rm/done.",
+        "iCloud Calendar + Reminders (CalDAV): list/timezones, gated add/update/rm/done with RRULE/VALARM.",
         calendar_commands.register,
     ),
     "messages": (
@@ -51,7 +52,7 @@ DOMAINS = {
         notes_commands.register,
     ),
     "drive": (
-        "iCloud Drive (filesystem): ls/tree/find/read, gated mkdir/put/rm.",
+        "iCloud Drive (filesystem): ls/tree/find/read, gated mkdir/put/rm/rename/move/copy.",
         drive_commands.register,
     ),
     "photos": (
@@ -59,7 +60,7 @@ DOMAINS = {
         photos_commands.register,
     ),
     "safari": (
-        "Safari (AppleScript): tabs/page-text/extract, gated open/search/close.",
+        "Safari: tabs/bookmarks/history/extract, gated open/search/close/bookmark add/rm.",
         safari_commands.register,
     ),
     "music": (
@@ -81,6 +82,10 @@ DOMAINS = {
     "ops": (
         "Ops helpers: write a mail-cleanup LaunchAgent plist (does not load).",
         ops_commands.register,
+    ),
+    "shortcuts": (
+        "Shortcuts.app: list installed shortcuts, gated run by exact name.",
+        shortcuts_commands.register,
     ),
 }
 

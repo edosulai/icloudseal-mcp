@@ -1,8 +1,8 @@
 """icloudseal-mcp stdio MCP server.
 
-Exposes iCloud plus local Safari/Music/Weather/Maps domains (Mail, Contacts,
-Calendar, Messages, Notes, Drive, Photos, Safari, Music, Weather, Maps) with
-seal-family two-phase mutations:
+Exposes iCloud plus local Safari/Music/Weather/Maps/Shortcuts domains (Mail,
+Contacts, Calendar, Messages, Notes, Drive, Photos, Safari, Music, Weather,
+Maps, Shortcuts) with seal-family two-phase mutations:
 
   prepare_* → show exact preview → user OK in chat → icloud_request_local_approval
 """
@@ -31,13 +31,14 @@ Before sensitive work:
    → icloud_request_local_approval (Touch ID / macOS password).
 5. On approval timeout or uncertainty: icloud_action_outcome first; never re-prepare a
    duplicate mutate blindly.
-6. Messages/Photos need Full Disk Access. Notes/Safari/Music need Automation.
-   Drive is local CloudDocs. Weather uses Open-Meteo (no WeatherKit). Maps
-   search is a local URL; opening Maps.app is gated. Health is fail-closed
+6. Messages/Photos/Safari bookmarks+history need Full Disk Access.
+   Notes/Safari/Music need Automation. Drive is local CloudDocs. Weather uses
+   Open-Meteo (no WeatherKit). Maps search is a local URL; opening Maps.app
+   is gated. Shortcuts uses the ``shortcuts`` CLI. Health is fail-closed
    until a signed HealthKit helper exists.
 
 Domains: mail, contacts, calendar, messages, notes, drive, photos, safari,
-music, weather, maps, health, ops.
+music, weather, maps, health, ops, shortcuts.
 Never claim a mutation succeeded unless request_local_approval / action_outcome reports success.
 Never claim Health works.
 """
@@ -112,7 +113,7 @@ def _tool(name: str, description: str, annotations: ToolAnnotations):
     "icloud_doctor",
     "One-shot diagnosis: credentials, domain readiness "
     "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos/Safari/Music/"
-    "Weather/Maps/Health), and exact next steps. "
+    "Weather/Maps/Health/Ops/Shortcuts), and exact next steps. "
     "Call first in a new chat.",
     READ_ANN,
 )
@@ -190,7 +191,7 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "calendar",
                 "transport": "CalDAV",
                 "reads": ["calendars", "events", "reminders", "timezones"],
-                "notes": "ATTENDEE + IANA timezone on event add/update.",
+                "notes": "ATTENDEE + IANA timezone + validated RRULE/VALARM on event add/update.",
                 "mutations": [
                     "event-add",
                     "event-update",
@@ -218,7 +219,7 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "drive",
                 "transport": "CloudDocs filesystem",
                 "reads": ["ls", "tree", "find", "read"],
-                "mutations": ["mkdir", "put", "rm→Trash"],
+                "mutations": ["mkdir", "put", "rm→Trash", "rename", "move", "copy"],
             },
             {
                 "id": "photos",
@@ -231,9 +232,9 @@ def icloud_list_domains() -> dict[str, Any]:
             {
                 "id": "safari",
                 "transport": "AppleScript Safari",
-                "reads": ["tabs", "current", "page-text", "extract"],
-                "mutations": ["open-url", "search", "close-tab"],
-                "requires": "Automation",
+                "reads": ["tabs", "current", "page-text", "extract", "bookmarks", "history"],
+                "mutations": ["open-url", "search", "close-tab", "bookmark-add", "bookmark-rm"],
+                "requires": "Automation + Full Disk Access for bookmarks/history",
             },
             {
                 "id": "music",
@@ -276,6 +277,13 @@ def icloud_list_domains() -> dict[str, Any]:
                 "reads": [],
                 "mutations": ["cleanup-agent write"],
                 "notes": "Writes a plist only. Does not launchctl load.",
+            },
+            {
+                "id": "shortcuts",
+                "transport": "shortcuts CLI",
+                "reads": ["list"],
+                "mutations": ["run"],
+                "notes": "Run is gated by exact installed name. No arbitrary input.",
             },
         ],
         "approval": "prepare_* → user OK → icloud_request_local_approval",
@@ -772,6 +780,37 @@ def icloud_safari_extract(
         return _err(exc)
 
 
+@_tool(
+    "icloud_safari_bookmarks",
+    "List Safari bookmarks from Bookmarks.plist (optional Reading List filter). "
+    "Requires Full Disk Access. Does not mutate bookmarks.",
+    READ_ANN,
+)
+def icloud_safari_bookmarks(
+    reading_list: bool | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    try:
+        items = services.safari_bookmarks(reading_list=reading_list, limit=limit)
+        return {"count": len(items), "bookmarks": items}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_safari_history",
+    "List recent Safari history from History.db. Requires Full Disk Access. "
+    "Read-only; history is never mutated.",
+    READ_ANN,
+)
+def icloud_safari_history(limit: int = 50) -> dict[str, Any]:
+    try:
+        items = services.safari_history(limit=limit)
+        return {"count": len(items), "history": items}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # ---------------------------------------------------------------------------
 # Music reads
 # ---------------------------------------------------------------------------
@@ -799,6 +838,24 @@ def icloud_music_now_playing() -> dict[str, Any]:
 def icloud_music_search(query: str, limit: int = 20) -> dict[str, Any]:
     try:
         return services.music_search(query, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+# ---------------------------------------------------------------------------
+# Shortcuts reads
+# ---------------------------------------------------------------------------
+
+
+@_tool(
+    "icloud_shortcuts_list",
+    "List installed Shortcut names via the shortcuts CLI. Never runs a shortcut.",
+    READ_ANN,
+)
+def icloud_shortcuts_list(limit: int = 100) -> dict[str, Any]:
+    try:
+        names = services.shortcuts_list(limit=limit)
+        return {"count": len(names), "shortcuts": names}
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1288,6 +1345,8 @@ def icloud_prepare_event_add(
     all_day: bool = False,
     timezone: str | None = None,
     attendees: list[str] | str | None = None,
+    rrule: str | None = None,
+    alarm: str | None = None,
 ) -> dict[str, Any]:
     try:
         collection = services.prepare_calendar_collection(calendar, events=True)
@@ -1297,7 +1356,8 @@ def icloud_prepare_event_add(
             f"Create event\nUID: {uid}\nTitle: {title}\nStart: {start}\nEnd: {end}\n"
             f"Location: {location or ''}\nCalendar: {calendar or '(default)'}\n"
             f"All-day: {all_day}\nTimezone: {timezone or '(floating/UTC)'}\n"
-            f"Attendees: {attendee_line or '(none)'}"
+            f"Attendees: {attendee_line or '(none)'}\n"
+            f"RRULE: {rrule or '(none)'}\nAlarm: {alarm or '(none)'}"
         )
         return approval.prepare_action(
             action="calendar.event_add",
@@ -1312,6 +1372,8 @@ def icloud_prepare_event_add(
                 "allDay": all_day,
                 "timezone": timezone,
                 "attendees": attendees,
+                "rrule": rrule,
+                "alarm": alarm,
                 "collection": collection,
                 "uid": uid,
             },
@@ -1357,12 +1419,14 @@ def icloud_prepare_event_update(
     all_day: bool | None = None,
     timezone: str | None = None,
     attendees: list[str] | str | None = None,
+    rrule: str | None = None,
+    alarm: str | None = None,
     days: int = 365,
 ) -> dict[str, Any]:
     try:
         if all(
             value is None
-            for value in (title, start, end, location, timezone, attendees)
+            for value in (title, start, end, location, timezone, attendees, rrule, alarm)
         ):
             raise services.ServiceError("Provide at least one event field to update.")
         target = services.prepare_event_target(query, days=days)
@@ -1373,7 +1437,9 @@ def icloud_prepare_event_update(
             f"Location: {target['location']}\nETag: {target['etag']}\n"
             f"New title={title}\nNew start={start}\nNew end={end}\n"
             f"New location={location}\nAll-day: {all_day}\n"
-            f"New timezone={timezone}\nNew attendees={attendee_line or '(unchanged)'}"
+            f"New timezone={timezone}\nNew attendees={attendee_line or '(unchanged)'}\n"
+            f"New RRULE={rrule if rrule is not None else '(unchanged)'}\n"
+            f"New alarm={alarm if alarm is not None else '(unchanged)'}"
         )
         return approval.prepare_action(
             action="calendar.event_update",
@@ -1388,6 +1454,8 @@ def icloud_prepare_event_update(
                 "allDay": all_day,
                 "timezone": timezone,
                 "attendees": attendees,
+                "rrule": rrule,
+                "alarm": alarm,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -1671,6 +1739,86 @@ def icloud_prepare_drive_rm(path: str) -> dict[str, Any]:
         return _err(exc)
 
 
+def _drive_transfer_preview(frozen: dict[str, Any]) -> str:
+    source = frozen["source"]
+    destination = frozen["destination"]
+    op = frozen["op"]
+    return (
+        f"{op.title()} iCloud Drive item\n"
+        f"From: {source['relative']}\n"
+        f"To: {destination['relative']}\n"
+        f"Directory: {source['isDirectory']}\n"
+        f"Bytes: {source['size']}\n"
+        f"SHA-256: {source['sha256'] or '(directory identity)'}\n"
+        f"Overwrite existing: {destination['existed']}"
+    )
+
+
+@_tool(
+    "icloud_prepare_drive_rename",
+    "Prepare renaming an iCloud Drive item in the same directory. "
+    "Dest is a basename only. Refuses the Drive root.",
+    PREPARE_ANN,
+)
+def icloud_prepare_drive_rename(
+    src: str, dest: str, overwrite: bool = False
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_drive_rename(src, dest, overwrite=overwrite)
+        return approval.prepare_action(
+            action="drive.rename",
+            target=f"drive:{frozen['source']['relative']}",
+            preview=_drive_transfer_preview(frozen),
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_drive_move",
+    "Prepare moving an iCloud Drive item inside the Drive jail. "
+    "If dest is an existing directory, the item is moved into it. "
+    "Refuses the Drive root.",
+    PREPARE_ANN,
+)
+def icloud_prepare_drive_move(
+    src: str, dest: str, overwrite: bool = False
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_drive_move(src, dest, overwrite=overwrite)
+        return approval.prepare_action(
+            action="drive.move",
+            target=f"drive:{frozen['source']['relative']}",
+            preview=_drive_transfer_preview(frozen),
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_drive_copy",
+    "Prepare copying an iCloud Drive item inside the Drive jail. "
+    "If dest is an existing directory, the copy is placed inside it. "
+    "Refuses the Drive root.",
+    PREPARE_ANN,
+)
+def icloud_prepare_drive_copy(
+    src: str, dest: str, overwrite: bool = False
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_drive_copy(src, dest, overwrite=overwrite)
+        return approval.prepare_action(
+            action="drive.copy",
+            target=f"drive:{frozen['source']['relative']}",
+            preview=_drive_transfer_preview(frozen),
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 @_tool(
     "icloud_prepare_photos_export",
     "Prepare exporting locally-downloaded Photos originals to a directory.",
@@ -1841,6 +1989,74 @@ def icloud_prepare_safari_close_tab(
         return approval.prepare_action(
             action="safari.close_tab",
             target=f"safari:{frozen['window_index']}:{frozen['tab_index']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_bookmark_add",
+    "Prepare adding a bookmark to the Safari bookmarks bar. "
+    "Title and http(s) URL are frozen. Does not execute JavaScript.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_bookmark_add(title: str, url: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_bookmark_add(title, url)
+        preview = (
+            f"Add Safari bookmark\nTitle: {frozen['title']}\n"
+            f"URL: {frozen['url']}\nLocation: bookmarks bar"
+        )
+        return approval.prepare_action(
+            action="safari.bookmark_add",
+            target=f"safari:bookmark:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_bookmark_rm",
+    "Prepare removing one Safari bookmarks-bar item by frozen title+URL.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_bookmark_rm(title: str, url: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_bookmark_rm(title, url)
+        preview = (
+            f"Remove Safari bookmark\nTitle: {frozen['title']}\n"
+            f"URL: {frozen['url']}\nLocation: bookmarks bar"
+        )
+        return approval.prepare_action(
+            action="safari.bookmark_rm",
+            target=f"safari:bookmark:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_shortcuts_run",
+    "Prepare running one installed Shortcut by exact name. "
+    "Does not pass input. Fails if the name is missing.",
+    PREPARE_ANN,
+)
+def icloud_prepare_shortcuts_run(name: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_shortcuts_run(name)
+        preview = (
+            f"Run Shortcut\nName: {frozen['name']}\n"
+            "No input is passed. Only the frozen installed name will run."
+        )
+        return approval.prepare_action(
+            action="shortcuts.run",
+            target=f"shortcuts:{frozen['name']}",
             preview=preview,
             payload=frozen,
         )

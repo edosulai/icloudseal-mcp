@@ -17,6 +17,7 @@ ALLOWED_SCHEMES = frozenset({"http", "https"})
 ALLOWED_TARGETS = frozenset({"new_tab", "new_window"})
 MAX_SEARCH_LEN = 200
 MAX_PAGE_CHARS = 8_000
+MAX_BOOKMARK_TITLE = 200
 
 
 class SafariError(RuntimeError):
@@ -189,6 +190,48 @@ def close_tab(
     end tell
 end run"""
     _run(script, str(window_index), str(tab_index), name, canonical)
+
+
+def validate_bookmark_title(title: str) -> str:
+    name = (title or "").strip()
+    if not name:
+        raise SafariError("bookmark title is required.")
+    if any(ch in name for ch in "\r\n\x00"):
+        raise SafariError("bookmark title must not contain control characters.")
+    if len(name) > MAX_BOOKMARK_TITLE:
+        raise SafariError(f"bookmark title is limited to {MAX_BOOKMARK_TITLE} characters.")
+    return name
+
+
+def add_bookmark(title: str, url: str) -> None:
+    """Add one bookmarks-bar item. Title and URL go through argv only."""
+    name = validate_bookmark_title(title)
+    canonical = validate_url(url)
+    script = """on run argv
+    set theName to item 1 of argv
+    set theURL to item 2 of argv
+    tell application "Safari"
+        if (count of windows) is 0 then activate
+        make new bookmark item at end of bookmarks bar with properties {name:theName, URL:theURL}
+    end tell
+end run"""
+    _run(script, name, canonical)
+
+
+def remove_bookmark(title: str, url: str) -> None:
+    """Delete the first bookmarks-bar item whose frozen title+URL still match."""
+    name = validate_bookmark_title(title)
+    canonical = validate_url(url)
+    script = """on run argv
+    set theName to item 1 of argv
+    set theURL to item 2 of argv
+    tell application "Safari"
+        set theItems to (every bookmark item of bookmarks bar whose name is theName and URL is theURL)
+        if (count of theItems) is 0 then error "No Safari bookmark with that title and URL"
+        delete item 1 of theItems
+    end tell
+end run"""
+    _run(script, name, canonical)
 
 
 def page_text(

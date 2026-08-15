@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -166,6 +167,94 @@ end run"""
     return 0
 
 
+def _transfer_preview(op: str, src: Path, dest: Path) -> None:
+    console.print(f"Would {op} [bold]{_rel(src)}[/bold] -> [bold]{_rel(dest)}[/bold]")
+
+
+def cmd_rename(args: argparse.Namespace) -> int:
+    src = _resolve(args.src)
+    if not src.exists():
+        raise SystemExit(f"Not found: {src}")
+    if src == DRIVE_ROOT.resolve():
+        raise SystemExit("Refusing to rename the iCloud Drive root.")
+    name = (args.dest or "").strip()
+    if not name or "/" in name or name in {".", ".."}:
+        raise SystemExit("rename dest must be a single file or folder name.")
+    dest = (src.parent / name).resolve()
+    if dest.parent != src.parent.resolve():
+        raise SystemExit("rename dest must stay in the same directory; use move instead.")
+    if dest.exists() and dest.is_dir():
+        raise SystemExit("Refusing to overwrite a directory destination.")
+    if dest.exists() and not args.overwrite:
+        raise SystemExit(f"Already exists: {_rel(dest)} (pass --overwrite).")
+    _transfer_preview("rename", src, dest)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to rename.")
+        return 0
+    if dest.exists():
+        dest.unlink()
+    src.replace(dest)
+    console.print(f"[green]Renamed[/green] {_rel(src)} -> {_rel(dest)}")
+    return 0
+
+
+def cmd_move(args: argparse.Namespace) -> int:
+    src = _resolve(args.src)
+    if not src.exists():
+        raise SystemExit(f"Not found: {src}")
+    if src == DRIVE_ROOT.resolve():
+        raise SystemExit("Refusing to move the iCloud Drive root.")
+    dest = _resolve(args.dest)
+    if dest.is_dir() and dest != src:
+        dest = dest / src.name
+    if dest == DRIVE_ROOT.resolve():
+        raise SystemExit("Destination must be inside iCloud Drive, not the root.")
+    if dest.exists() and dest.is_dir():
+        raise SystemExit("Refusing to overwrite a directory destination.")
+    if dest.exists() and not args.overwrite:
+        raise SystemExit(f"Already exists: {_rel(dest)} (pass --overwrite).")
+    _transfer_preview("move", src, dest)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to move.")
+        return 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    src.replace(dest)
+    console.print(f"[green]Moved[/green] {_rel(src)} -> {_rel(dest)}")
+    return 0
+
+
+def cmd_copy(args: argparse.Namespace) -> int:
+    src = _resolve(args.src)
+    if not src.exists():
+        raise SystemExit(f"Not found: {src}")
+    if src == DRIVE_ROOT.resolve():
+        raise SystemExit("Refusing to copy the iCloud Drive root.")
+    dest = _resolve(args.dest)
+    if dest.is_dir() and dest != src:
+        dest = dest / src.name
+    if dest == DRIVE_ROOT.resolve():
+        raise SystemExit("Destination must be inside iCloud Drive, not the root.")
+    if dest.exists() and dest.is_dir():
+        raise SystemExit("Refusing to overwrite a directory destination.")
+    if dest.exists() and not args.overwrite:
+        raise SystemExit(f"Already exists: {_rel(dest)} (pass --overwrite).")
+    _transfer_preview("copy", src, dest)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to copy.")
+        return 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        if dest.exists():
+            raise SystemExit("Refusing to overwrite a destination while copying a directory.")
+        shutil.copytree(src, dest, symlinks=False)
+    else:
+        shutil.copy2(src, dest)
+    console.print(f"[green]Copied[/green] {_rel(src)} -> {_rel(dest)}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("ls", help="List a directory.")
     sp.add_argument("path", nargs="?", help="Path relative to iCloud Drive root")
@@ -201,6 +290,27 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("path")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_rm)
+
+    sp = sub.add_parser("rename", help="Rename a file/dir in place. Requires --apply.")
+    sp.add_argument("src")
+    sp.add_argument("dest", help="New basename only (no slashes)")
+    sp.add_argument("--overwrite", action="store_true")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_rename)
+
+    sp = sub.add_parser("move", help="Move a file/dir inside iCloud Drive. Requires --apply.")
+    sp.add_argument("src")
+    sp.add_argument("dest")
+    sp.add_argument("--overwrite", action="store_true")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_move)
+
+    sp = sub.add_parser("copy", help="Copy a file/dir inside iCloud Drive. Requires --apply.")
+    sp.add_argument("src")
+    sp.add_argument("dest")
+    sp.add_argument("--overwrite", action="store_true")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_copy)
 
 
 __all__ = ["register"]

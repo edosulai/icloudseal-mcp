@@ -24,10 +24,10 @@ actions without explicit local approval.
 |---|---|---|
 | Metadata / health | `icloud_doctor`, folder counts, domain list | free |
 | Sensitive read | SMS/iMessage bodies, email bodies, full contacts, notes | free over MCP (content enters agent context); FDA/Automation OS gates apply |
-| Externally visible / mutate | send mail, flag/move/trash/create-folder mail, send iMessage (optional attach), create/update/delete contacts, calendar write, notes update, drive mkdir/put/rm, mail apply, Safari open/search/close, Music playback/volume/shuffle/repeat/play, Maps open, Photos favorite/album-add, ops cleanup-agent | **prepare preview → explicit chat OK → Touch ID / macOS password** |
+| Externally visible / mutate | send mail, flag/move/trash/create-folder mail, send iMessage (optional attach), create/update/delete contacts, calendar write, notes update, drive mkdir/put/rm/rename/move/copy, mail apply, Safari open/search/close/bookmark add/rm, Music playback/volume/shuffle/repeat/play, Maps open, Photos favorite/album-add/album-create, ops cleanup-agent, Shortcuts run | **prepare preview → explicit chat OK → Touch ID / macOS password** |
 
 - CLI: dry-run plans + `--apply`.
-- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~88 tools).  
+- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~97 tools).  
   Draft store TTL 10 minutes, single-use; helper `native-approval.swift` compiled to
   `~/Library/Application Support/icloudseal-mcp/bin/native-approval` (mode `0500`).
 - MCP SDK is pinned to the supported major range `mcp>=2,<3`; tool failures use
@@ -51,22 +51,28 @@ Prepare resolves every mutable selector before native approval:
   tokens (`+Flagged`, `-Answered`); raw IMAP `\Flagged` is rejected.
 - Contacts/Calendar: exact href, ETag, UID, and raw vCard/iCalendar document.
   Unknown properties, recurrence, and alarms are preserved on update.
-  Event create/update may freeze a validated IANA timezone and ATTENDEE
-  mailto lines.
+  Event create/update may freeze a validated IANA timezone, ATTENDEE
+  mailto lines, a validated RRULE, and a DISPLAY VALARM trigger. Empty
+  `rrule`/`alarm` on update clears those fields; omitting them preserves
+  existing recurrence and alarms.
 - Notes: exact Notes.app ID, modified date, body, and body hash.
 - Drive: resolved source/destination or removal target, stat identity, and
   content/tree hashes; overwrite must be explicit. mkdir freezes the
-  relative path and refuses Drive root or an existing dest.
+  relative path and refuses Drive root or an existing dest. Rename/move/copy
+  freeze the source snapshot plus dest; rename dest is a basename; directory
+  overwrite is refused.
 - Photos: export freezes asset UUID/catalog path and downloaded-original hash.
   Favorite / album-add freeze filename (not UUID) plus favorite/album.
   Album-create freezes a title and refuses an existing album. Import is
   not implemented.
 - Safari: exact `http`/`https` URL plus `new_tab`/`new_window`. Search reuses
   that contract after building a Google URL. Close-tab freezes
-  `window_index`/`tab_index` plus name/url snapshot. Page text is
-  size-capped source and read-only. Extract is allowlisted `title_text`
-  only: a hardcoded `document.title` + `document.body.innerText` script.
-  User JavaScript is refused.
+  `window_index`/`tab_index` plus name/url snapshot. Bookmark add/rm freeze
+  title+URL and mutate the bookmarks bar only. Bookmarks/history reads use
+  `Bookmarks.plist` / `History.db` (FDA). History is never mutated. Page
+  text is size-capped source and read-only. Extract is allowlisted
+  `title_text` only: a hardcoded `document.title` + `document.body.innerText`
+  script. User JavaScript is refused.
 - Music: playback action plus a now-playing snapshot. Constant scripts stay
   `playpause` / `next track` / `previous track`. Volume/shuffle/repeat/play
   pass argv-only values (`level`, `mode`, `query`). Search is a read: names
@@ -77,6 +83,9 @@ Prepare resolves every mutable selector before native approval:
   then launches `/usr/bin/open`.
 - Ops: cleanup-agent freezes destination, interval, label, and plist hash.
   Execution writes the plist and never `launchctl load`s it.
+- Shortcuts: run freezes an exact installed name from `shortcuts list`.
+  Execution re-lists and refuses if the name is missing. No shortcut input
+  is passed.
 - Health: status is fail-closed. There is no working sample reader.
 
 Query strings, mutable plan-file references, and post-approval re-searches are
@@ -100,14 +109,15 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
 3. Calendar + Reminders — CalDAV
 4. Messages / SMS — `~/Library/Messages/chat.db` (Full Disk Access)
 5. Notes — AppleScript
-6. iCloud Drive — filesystem under CloudDocs
+6. iCloud Drive — filesystem under CloudDocs (mkdir/put/rm/rename/move/copy)
 7. Photos — `Photos.sqlite` read + best-effort export + gated favorite/album-add/album-create
-8. Safari — AppleScript tabs/current/page-text/extract + gated http(s) open/search/close
+8. Safari — AppleScript tabs/current/page-text/extract + FDA bookmarks/history + gated http(s) open/search/close/bookmark add/rm
 9. Music — AppleScript now-playing/search + gated playback/volume/shuffle/repeat/play
 10. Weather — Open-Meteo HTTPS current + short daily forecast (hourly/minutely opt-in)
 11. Maps — documented `maps.apple.com` URL search + gated open (optional z/t)
 12. Health — fail-closed status until a signed HealthKit helper exists
 13. Ops — LaunchAgent plist write for `mail cleanup strict` (no load)
+14. Shortcuts — `shortcuts` CLI list + gated run by exact name
 
 **Not supported:** WhatsApp (use `whatseal-mcp`). Instagram (use `instaseal-mcp`).
 Working HealthKit reads (needs a *separate* signed native helper; status is

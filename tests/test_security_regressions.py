@@ -22,6 +22,8 @@ from icloudseal_mcp.calendar.caldav import (
     list_timezones,
     update_event,
     update_reminder,
+    validate_alarm,
+    validate_rrule,
     validate_timezone,
 )
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
@@ -35,6 +37,8 @@ from icloudseal_mcp.notes import applescript
 from icloudseal_mcp.paths import managed_path
 from icloudseal_mcp.photos import applescript as photos_script
 from icloudseal_mcp.safari import applescript as safari_script
+from icloudseal_mcp.safari import store as safari_store
+from icloudseal_mcp.shortcuts import runner as shortcuts_runner
 from icloudseal_mcp.weather import client as weather_client
 
 
@@ -1191,3 +1195,148 @@ def test_list_timezones_filters_and_limits() -> None:
         list_timezones(query="Asia\nTokyo")
     with pytest.raises(ValueError, match="limit"):
         list_timezones(limit=0)
+
+
+def test_validate_rrule_and_alarm_refuse_injection() -> None:
+    assert validate_rrule("rrule:freq=weekly;count=8;byday=mo") == "FREQ=WEEKLY;COUNT=8;BYDAY=MO"
+    assert validate_alarm("-PT15M") == "-PT15M"
+    ics = build_event(
+        uid="E1",
+        summary="Standup",
+        start="2026-04-01 09:00",
+        end="2026-04-01 10:00",
+        rrule="FREQ=WEEKLY;INTERVAL=1;COUNT=8",
+        alarm="-PT15M",
+    )
+    assert "RRULE:FREQ=WEEKLY;INTERVAL=1;COUNT=8" in ics
+    assert "BEGIN:VALARM" in ics
+    assert "TRIGGER:-PT15M" in ics
+    with pytest.raises(ValueError, match="FREQ"):
+        validate_rrule("COUNT=8")
+    with pytest.raises(ValueError, match="both COUNT and UNTIL"):
+        validate_rrule("FREQ=DAILY;COUNT=2;UNTIL=20260401")
+    with pytest.raises(ValueError, match="unknown|limited"):
+        validate_rrule("FREQ=WEEKLY;BYHOUR=9")
+    with pytest.raises(ValueError, match="control"):
+        validate_rrule("FREQ=WEEKLY\nBYDAY=MO")
+    with pytest.raises(ValueError, match="ISO-8601"):
+        validate_alarm("15 minutes")
+    with pytest.raises(ValueError, match="control"):
+        validate_alarm("-PT15M\nACTION:AUDIO")
+
+
+def test_update_event_can_replace_or_clear_rrule_and_alarm() -> None:
+    raw = (
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSUMMARY:Standup\r\n"
+        "DTSTART:20260115T090000\r\nDTEND:20260115T093000\r\n"
+        "RRULE:FREQ=WEEKLY\r\nX-CUSTOM:keep\r\nSEQUENCE:2\r\n"
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:ping\r\n"
+        "END:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    replaced = update_event(raw, rrule="FREQ=MONTHLY;COUNT=3", alarm="-P1D")
+    assert "RRULE:FREQ=MONTHLY;COUNT=3" in replaced
+    assert "RRULE:FREQ=WEEKLY" not in replaced
+    assert "TRIGGER:-P1D" in replaced
+    assert "DESCRIPTION:ping" not in replaced
+    assert "X-CUSTOM:keep" in replaced
+
+    cleared = update_event(raw, rrule="", alarm="")
+    assert "RRULE:" not in cleared
+    assert "BEGIN:VALARM" not in cleared
+    assert "X-CUSTOM:keep" in cleared
+
+
+def test_drive_rename_move_copy_stay_in_jail_and_refuse_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drive = tmp_path / "CloudDocs"
+    folder = drive / "inbox"
+    folder.mkdir(parents=True)
+    source = folder / "note.txt"
+    source.write_text("approved", encoding="utf-8")
+    (drive / "exists.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(services, "DRIVE_ROOT", drive)
+
+    renamed = services.prepare_drive_rename("inbox/note.txt", "renamed.txt")
+    assert renamed["op"] == "rename"
+    assert renamed["destination"]["relative"] == "inbox/renamed.txt"
+    result = services.exec_drive_rename(renamed)
+    assert result["dest"] == "inbox/renamed.txt"
+    assert (folder / "renamed.txt").read_text(encoding="utf-8") == "approved"
+    assert not source.exists()
+
+    archive = drive / "archive"
+    archive.mkdir()
+    moved = services.prepare_drive_move("inbox/renamed.txt", "archive")
+    assert moved["destination"]["relative"] == "archive/renamed.txt"
+    services.exec_drive_move(moved)
+    assert (archive / "renamed.txt").is_file()
+    assert not (folder / "renamed.txt").exists()
+
+    copied = services.prepare_drive_copy("archive/renamed.txt", "copy.txt")
+    services.exec_drive_copy(copied)
+    assert (drive / "copy.txt").read_text(encoding="utf-8") == "approved"
+    assert (archive / "renamed.txt").exists()
+
+    clash = archive / "copy.txt"
+    clash.mkdir()
+    with pytest.raises(services.ServiceError, match="single file or folder name"):
+        services.prepare_drive_rename("copy.txt", "../escape.txt")
+    with pytest.raises(services.ServiceError, match="root"):
+        services.prepare_drive_rename(".", "other")
+    with pytest.raises(services.ServiceError, match="overwrite=true"):
+        services.prepare_drive_copy("copy.txt", "exists.txt")
+    with pytest.raises(services.ServiceError, match="directory destination"):
+        services.prepare_drive_copy("copy.txt", "archive", overwrite=True)
+
+
+def test_safari_bookmark_mutations_use_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    title = 'Docs" & do shell script "touch /tmp/pwned" & "'
+    url = "https://example.com/docs"
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    safari_script.add_bookmark(title, url)
+    safari_script.remove_bookmark(title, url)
+    assert len(calls) == 2
+    for command in calls:
+        assert title not in command[2]
+        assert url not in command[2]
+        assert command[4:] == [title, url]
+    with pytest.raises(safari_script.SafariError, match="control"):
+        safari_script.validate_bookmark_title("bad\ntitle")
+    with pytest.raises(safari_script.SafariError, match="http or https"):
+        safari_script.add_bookmark("Docs", "javascript:alert(1)")
+
+
+def test_safari_store_limit_is_bounded() -> None:
+    with pytest.raises(safari_store.SafariStoreError, match="limit"):
+        safari_store.list_bookmarks(limit=0)
+    with pytest.raises(safari_store.SafariStoreError, match="limit"):
+        safari_store.list_history(limit=0)
+
+
+def test_shortcuts_run_uses_exact_name_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(*args: str) -> str:
+        calls.append(list(args))
+        if args == ("list",):
+            return "Morning\nFocus\n"
+        if args == ("run", "Focus"):
+            return ""
+        raise shortcuts_runner.ShortcutsError("unexpected")
+
+    monkeypatch.setattr(shortcuts_runner, "_run", fake_run)
+    assert shortcuts_runner.require_named("Focus") == "Focus"
+    shortcuts_runner.run_shortcut("Focus")
+    assert calls == [["list"], ["list"], ["run", "Focus"]]
+    with pytest.raises(shortcuts_runner.ShortcutsError, match="No shortcut"):
+        shortcuts_runner.require_named("Missing")
+    with pytest.raises(shortcuts_runner.ShortcutsError, match="control"):
+        shortcuts_runner.require_named("bad\nname")

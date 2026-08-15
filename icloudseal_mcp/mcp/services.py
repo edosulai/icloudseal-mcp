@@ -56,7 +56,11 @@ from ..photos import photosdb
 from ..photos.applescript import PhotosScriptError
 from ..photos.photosdb import PhotosAccessError
 from ..safari import applescript as safari_script
+from ..safari import store as safari_store
 from ..safari.applescript import SafariError
+from ..safari.store import SafariStoreError
+from ..shortcuts import runner as shortcuts_runner
+from ..shortcuts.runner import ShortcutsError
 from ..weather import client as weather_client
 from ..weather.client import WeatherError
 
@@ -245,6 +249,8 @@ def doctor() -> dict[str, Any]:
                 "ready": True,
             },
             "health": health,
+            "ops": {"ok": True, "transport": "LaunchAgent template"},
+            "shortcuts": _probe_shortcuts(),
         },
         "workflow": {
             "firstCall": "icloud_doctor",
@@ -258,7 +264,7 @@ def doctor() -> dict[str, Any]:
         "agentNextSteps": steps
         or [
             "Call domain read tools (mail/contacts/calendar/messages/notes/"
-            "drive/photos/safari/music/weather/maps).",
+            "drive/photos/safari/music/weather/maps/shortcuts).",
             "For mutations: prepare_* then request_local_approval after explicit user OK.",
         ],
         "userMessage": (
@@ -370,6 +376,20 @@ def _probe_safari() -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "needsAutomation": True}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "needsAutomation": True}
+
+
+def _probe_shortcuts() -> dict[str, Any]:
+    try:
+        names = shortcuts_runner.list_shortcuts(limit=1)
+        return {
+            "ok": True,
+            "sample": len(names),
+            "transport": "shortcuts CLI",
+        }
+    except ShortcutsError as exc:
+        return {"ok": False, "error": str(exc), "transport": "shortcuts CLI"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "transport": "shortcuts CLI"}
 
 
 def _probe_music() -> dict[str, Any]:
@@ -1482,6 +1502,8 @@ def exec_event_add(payload: dict[str, Any]) -> dict[str, Any]:
             all_day=bool(payload.get("allDay")),
             timezone=payload.get("timezone"),
             attendees=payload.get("attendees"),
+            rrule=payload.get("rrule"),
+            alarm=payload.get("alarm"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -1522,6 +1544,8 @@ def exec_event_update(payload: dict[str, Any]) -> dict[str, Any]:
             all_day=payload.get("allDay"),
             timezone=payload.get("timezone"),
             attendees=payload.get("attendees"),
+            rrule=payload.get("rrule"),
+            alarm=payload.get("alarm"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -2053,6 +2077,167 @@ end run"""
     return {"path": target["relative"], "trashed": True}
 
 
+def _drive_item_identity(path: Path) -> dict[str, Any]:
+    if path == DRIVE_ROOT.resolve():
+        raise ServiceError("Refusing to mutate the iCloud Drive root.")
+    if not path.exists():
+        raise ServiceError(f"Not found: {path}")
+    stat_result = path.stat()
+    return {
+        "path": str(path),
+        "relative": _drive_rel(path),
+        "isDirectory": path.is_dir(),
+        "size": stat_result.st_size,
+        "mtimeNs": stat_result.st_mtime_ns,
+        "inode": stat_result.st_ino,
+        "sha256": _file_sha256(path) if path.is_file() else None,
+        "tree": _tree_snapshot(path) if path.is_dir() else None,
+    }
+
+
+def _drive_identity_matches(path: Path, snapshot: dict[str, Any]) -> bool:
+    if not path.exists() or str(path) != snapshot.get("path"):
+        return False
+    stat_result = path.stat()
+    if (
+        path.is_dir() != snapshot.get("isDirectory")
+        or stat_result.st_size != snapshot.get("size")
+        or stat_result.st_mtime_ns != snapshot.get("mtimeNs")
+        or stat_result.st_ino != snapshot.get("inode")
+    ):
+        return False
+    if path.is_file():
+        return _file_sha256(path) == snapshot.get("sha256")
+    if path.is_dir():
+        return _tree_snapshot(path) == snapshot.get("tree")
+    return False
+
+
+def _drive_dest_payload(dest: Path, *, overwrite: bool) -> dict[str, Any]:
+    if dest == DRIVE_ROOT.resolve():
+        raise ServiceError("Destination must be inside iCloud Drive, not the root.")
+    if dest.exists() and not overwrite:
+        raise ServiceError("Destination exists; set overwrite=true to replace it explicitly.")
+    if dest.exists() and dest.is_dir() and overwrite:
+        raise ServiceError("Refusing to overwrite a directory destination.")
+    return {
+        "path": str(dest),
+        "relative": _drive_rel(dest),
+        "existed": dest.exists(),
+        "snapshot": _file_snapshot(dest) if dest.is_file() else None,
+    }
+
+
+def prepare_drive_rename(src: str, dest: str, *, overwrite: bool = False) -> dict[str, Any]:
+    source = _drive_resolve(src)
+    identity = _drive_item_identity(source)
+    target = dest.strip()
+    if not target or "/" in target or target in {".", ".."}:
+        raise ServiceError("rename dest must be a single file or folder name.")
+    if any(ch in target for ch in "\r\n\x00"):
+        raise ServiceError("rename dest must not contain control characters.")
+    destination = (source.parent / target).resolve()
+    if destination.parent != source.parent.resolve():
+        raise ServiceError("rename dest must stay in the same directory; use move instead.")
+    if destination == source:
+        raise ServiceError("Source and destination are the same path.")
+    return {
+        "op": "rename",
+        "source": identity,
+        "destination": _drive_dest_payload(destination, overwrite=overwrite),
+        "overwrite": overwrite,
+    }
+
+
+def prepare_drive_move(src: str, dest: str, *, overwrite: bool = False) -> dict[str, Any]:
+    source = _drive_resolve(src)
+    identity = _drive_item_identity(source)
+    destination = _drive_resolve(dest)
+    if destination.is_dir() and destination != source:
+        destination = (destination / source.name).resolve()
+    if destination == source:
+        raise ServiceError("Source and destination are the same path.")
+    return {
+        "op": "move",
+        "source": identity,
+        "destination": _drive_dest_payload(destination, overwrite=overwrite),
+        "overwrite": overwrite,
+    }
+
+
+def prepare_drive_copy(src: str, dest: str, *, overwrite: bool = False) -> dict[str, Any]:
+    source = _drive_resolve(src)
+    identity = _drive_item_identity(source)
+    destination = _drive_resolve(dest)
+    if destination.is_dir() and destination != source:
+        destination = (destination / source.name).resolve()
+    if destination == source:
+        raise ServiceError("Source and destination are the same path.")
+    return {
+        "op": "copy",
+        "source": identity,
+        "destination": _drive_dest_payload(destination, overwrite=overwrite),
+        "overwrite": overwrite,
+    }
+
+
+def _exec_drive_transfer(payload: dict[str, Any], *, copy: bool) -> dict[str, Any]:
+    source = payload["source"]
+    src = _drive_resolve(source["path"])
+    if str(src) != source["path"] or not _drive_identity_matches(src, source):
+        raise ServiceError("Approved iCloud Drive source changed; refusing to continue.")
+    destination = payload["destination"]
+    dest = _drive_resolve(destination["path"])
+    if str(dest) != destination["path"]:
+        raise ServiceError("Approved iCloud Drive destination changed through a symlink.")
+    if dest == DRIVE_ROOT.resolve() or src == DRIVE_ROOT.resolve():
+        raise ServiceError("Refusing to mutate the iCloud Drive root.")
+    if destination["existed"]:
+        if not payload.get("overwrite") or not dest.is_file() or not _snapshot_matches(
+            dest, destination["snapshot"]
+        ):
+            raise ServiceError("Approved destination changed; refusing to overwrite it.")
+    elif dest.exists():
+        raise ServiceError("Destination appeared after approval; refusing to overwrite it.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if copy:
+        if src.is_dir():
+            if dest.exists():
+                raise ServiceError("Refusing to overwrite a destination while copying a directory.")
+            shutil.copytree(src, dest, symlinks=False)
+        else:
+            temp = dest.with_name(f".{dest.name}.{uuid.uuid4()}.tmp")
+            try:
+                shutil.copy2(src, temp)
+                if _file_sha256(temp) != source["sha256"]:
+                    raise ServiceError("Copied file failed its integrity check.")
+                os.replace(temp, dest)
+            finally:
+                temp.unlink(missing_ok=True)
+    else:
+        if dest.exists():
+            dest.unlink()
+        src.replace(dest)
+    return {
+        "op": payload.get("op"),
+        "src": source["relative"],
+        "dest": _drive_rel(dest),
+        "isDirectory": dest.is_dir(),
+    }
+
+
+def exec_drive_rename(payload: dict[str, Any]) -> dict[str, Any]:
+    return _exec_drive_transfer(payload, copy=False)
+
+
+def exec_drive_move(payload: dict[str, Any]) -> dict[str, Any]:
+    return _exec_drive_transfer(payload, copy=False)
+
+
+def exec_drive_copy(payload: dict[str, Any]) -> dict[str, Any]:
+    return _exec_drive_transfer(payload, copy=True)
+
+
 # ---------------------------------------------------------------------------
 # Photos
 # ---------------------------------------------------------------------------
@@ -2352,6 +2537,100 @@ def safari_page_text(
         "chars": len(text),
         "text": text,
     }
+
+
+def safari_bookmarks(*, reading_list: bool | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    try:
+        return [
+            item.to_dict()
+            for item in safari_store.list_bookmarks(reading_list=reading_list, limit=limit)
+        ]
+    except SafariStoreError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def safari_history(*, limit: int = 50) -> list[dict[str, Any]]:
+    try:
+        return [item.to_dict() for item in safari_store.list_history(limit=limit)]
+    except SafariStoreError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def prepare_safari_bookmark_add(title: str, url: str) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(title)
+        canonical = safari_script.validate_url(url)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical}
+
+
+def exec_safari_bookmark_add(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(str(payload.get("title") or ""))
+        canonical = safari_script.validate_url(str(payload.get("url") or ""))
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if name != payload.get("title") or canonical != payload.get("url"):
+        raise ServiceError("Approved Safari bookmark identity changed; refusing to add.")
+    try:
+        safari_script.add_bookmark(name, canonical)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical, "added": True}
+
+
+def prepare_safari_bookmark_rm(title: str, url: str) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(title)
+        canonical = safari_script.validate_url(url)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical}
+
+
+def exec_safari_bookmark_rm(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        name = safari_script.validate_bookmark_title(str(payload.get("title") or ""))
+        canonical = safari_script.validate_url(str(payload.get("url") or ""))
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if name != payload.get("title") or canonical != payload.get("url"):
+        raise ServiceError("Approved Safari bookmark identity changed; refusing to remove.")
+    try:
+        safari_script.remove_bookmark(name, canonical)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"title": name, "url": canonical, "removed": True}
+
+
+def shortcuts_list(*, limit: int = 100) -> list[str]:
+    try:
+        return shortcuts_runner.list_shortcuts(limit=limit)
+    except ShortcutsError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def prepare_shortcuts_run(name: str) -> dict[str, Any]:
+    try:
+        frozen = shortcuts_runner.require_named(name)
+    except ShortcutsError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"name": frozen}
+
+
+def exec_shortcuts_run(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        frozen = shortcuts_runner.require_named(str(payload.get("name") or ""))
+    except ShortcutsError as exc:
+        raise ServiceError(str(exc)) from exc
+    if frozen != payload.get("name"):
+        raise ServiceError("Approved shortcut name changed; refusing to run.")
+    try:
+        shortcuts_runner.run_shortcut(frozen)
+    except ShortcutsError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"name": frozen, "ran": True}
 
 
 def safari_page_extract(
@@ -2763,12 +3042,18 @@ def register_all_executors() -> None:
     approval.register_executor("drive.put", exec_drive_put)
     approval.register_executor("drive.mkdir", exec_drive_mkdir)
     approval.register_executor("drive.rm", exec_drive_rm)
+    approval.register_executor("drive.rename", exec_drive_rename)
+    approval.register_executor("drive.move", exec_drive_move)
+    approval.register_executor("drive.copy", exec_drive_copy)
     approval.register_executor("photos.export", exec_photos_export)
     approval.register_executor("photos.favorite", exec_photos_favorite)
     approval.register_executor("photos.album_add", exec_photos_album_add)
     approval.register_executor("photos.album_create", exec_photos_album_create)
     approval.register_executor("safari.open_url", exec_safari_open_url)
     approval.register_executor("safari.close_tab", exec_safari_close_tab)
+    approval.register_executor("safari.bookmark_add", exec_safari_bookmark_add)
+    approval.register_executor("safari.bookmark_rm", exec_safari_bookmark_rm)
+    approval.register_executor("shortcuts.run", exec_shortcuts_run)
     approval.register_executor("music.playpause", exec_music_playpause)
     approval.register_executor("music.next", exec_music_next)
     approval.register_executor("music.previous", exec_music_previous)

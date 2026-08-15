@@ -19,6 +19,20 @@ from ..dav.client import CALDAV_BASE, NS, DavClient, DavError
 from ..mail.smtp_client import normalize_addresses
 
 _TZID_RE = re.compile(r"^[A-Za-z0-9_+\-/]+$")
+_UNTIL_RE = re.compile(r"^\d{8}(?:T\d{6}Z)?$")
+_BYDAY_RE = re.compile(
+    r"^(?:-?[1-5])?(?:MO|TU|WE|TH|FR|SA|SU)"
+    r"(?:,(?:-?[1-5])?(?:MO|TU|WE|TH|FR|SA|SU))*$"
+)
+_BYMONTHDAY_RE = re.compile(r"^-?(?:[1-9]|[12]\d|3[01])(?:,-?(?:[1-9]|[12]\d|3[01]))*$")
+_BYMONTH_RE = re.compile(r"^(?:[1-9]|1[0-2])(?:,(?:[1-9]|1[0-2]))*$")
+_ALARM_RE = re.compile(r"^-?P(?=.+)(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$")
+
+ALLOWED_RRULE_FREQ = frozenset({"DAILY", "WEEKLY", "MONTHLY", "YEARLY"})
+ALLOWED_RRULE_KEYS = frozenset(
+    {"FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH"}
+)
+RRULE_KEY_ORDER = ("FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH")
 
 CAL_NS = "urn:ietf:params:xml:ns:caldav"
 
@@ -193,6 +207,88 @@ def _attendee_lines(attendees: list[str] | str | None) -> list[str]:
     return [f"ATTENDEE:mailto:{addr}" for addr in addresses]
 
 
+def validate_rrule(value: str) -> str:
+    """Return a canonical RRULE body. Refuses unknown keys and raw injection."""
+    text = (value or "").strip()
+    if not text:
+        raise ValueError("rrule is required.")
+    if any(ch in text for ch in "\r\n\x00"):
+        raise ValueError("rrule must not contain control characters.")
+    if text.upper().startswith("RRULE:"):
+        text = text[6:]
+    if not text or len(text) > 200:
+        raise ValueError("rrule must be 1-200 characters.")
+    seen: dict[str, str] = {}
+    for part in text.split(";"):
+        if not part or "=" not in part:
+            raise ValueError("rrule parts must look like FREQ=WEEKLY.")
+        key, raw = part.split("=", 1)
+        key = key.strip().upper()
+        token = raw.strip().upper()
+        if key not in ALLOWED_RRULE_KEYS:
+            raise ValueError(
+                "rrule keys are limited to FREQ, INTERVAL, COUNT, UNTIL, "
+                "BYDAY, BYMONTHDAY, BYMONTH."
+            )
+        if key in seen:
+            raise ValueError(f"rrule key {key} is duplicated.")
+        if key == "FREQ":
+            if token not in ALLOWED_RRULE_FREQ:
+                raise ValueError("rrule FREQ must be DAILY, WEEKLY, MONTHLY, or YEARLY.")
+            seen[key] = token
+        elif key == "INTERVAL":
+            if not token.isdigit() or not 1 <= int(token) <= 366:
+                raise ValueError("rrule INTERVAL must be an integer from 1 to 366.")
+            seen[key] = str(int(token))
+        elif key == "COUNT":
+            if not token.isdigit() or not 1 <= int(token) <= 999:
+                raise ValueError("rrule COUNT must be an integer from 1 to 999.")
+            seen[key] = str(int(token))
+        elif key == "UNTIL":
+            if not _UNTIL_RE.fullmatch(token):
+                raise ValueError("rrule UNTIL must be YYYYMMDD or YYYYMMDDTHHMMSSZ.")
+            seen[key] = token
+        elif key == "BYDAY":
+            if not _BYDAY_RE.fullmatch(token):
+                raise ValueError("rrule BYDAY must look like MO or 1MO,-1FR.")
+            seen[key] = token
+        elif key == "BYMONTHDAY":
+            if not _BYMONTHDAY_RE.fullmatch(token):
+                raise ValueError("rrule BYMONTHDAY must be 1-31 or -1 to -31.")
+            seen[key] = token
+        elif key == "BYMONTH":
+            if not _BYMONTH_RE.fullmatch(token):
+                raise ValueError("rrule BYMONTH must be 1-12.")
+            seen[key] = token
+    if "FREQ" not in seen:
+        raise ValueError("rrule must include FREQ=DAILY|WEEKLY|MONTHLY|YEARLY.")
+    if "COUNT" in seen and "UNTIL" in seen:
+        raise ValueError("rrule cannot include both COUNT and UNTIL.")
+    return ";".join(f"{key}={seen[key]}" for key in RRULE_KEY_ORDER if key in seen)
+
+
+def validate_alarm(value: str) -> str:
+    """Return a DISPLAY VALARM TRIGGER duration such as -PT15M or -P1D."""
+    text = (value or "").strip().upper()
+    if not text:
+        raise ValueError("alarm is required.")
+    if any(ch in text for ch in "\r\n\x00"):
+        raise ValueError("alarm must not contain control characters.")
+    if not _ALARM_RE.fullmatch(text):
+        raise ValueError("alarm must be an ISO-8601 duration like -PT15M or -P1D.")
+    return text
+
+
+def _alarm_lines(trigger: str) -> list[str]:
+    return [
+        "BEGIN:VALARM",
+        "ACTION:DISPLAY",
+        "DESCRIPTION:Event reminder",
+        f"TRIGGER:{trigger}",
+        "END:VALARM",
+    ]
+
+
 def _now_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
@@ -201,6 +297,7 @@ def build_event(
     *, uid: str, summary: str, start: str, end: str | None = None,
     location: str = "", all_day: bool = False,
     timezone: str | None = None, attendees: list[str] | str | None = None,
+    rrule: str | None = None, alarm: str | None = None,
 ) -> str:
     sp, sv = _ical_dt(start, all_day=all_day, timezone=timezone)
     lines = [
@@ -214,6 +311,10 @@ def build_event(
     if location:
         lines.append(f"LOCATION:{location}")
     lines.extend(_attendee_lines(attendees))
+    if rrule:
+        lines.append(f"RRULE:{validate_rrule(rrule)}")
+    if alarm:
+        lines.extend(_alarm_lines(validate_alarm(alarm)))
     lines += ["END:VEVENT", "END:VCALENDAR"]
     return "\r\n".join(lines) + "\r\n"
 
@@ -246,11 +347,13 @@ def update_event(
     all_day: bool | None = None,
     timezone: str | None = None,
     attendees: list[str] | str | None = None,
+    rrule: str | None = None,
+    alarm: str | None = None,
 ) -> str:
     """Patch exposed VEVENT fields without erasing recurrence, alarms, or metadata."""
     if all(
         value is None
-        for value in (summary, start, end, location, attendees, timezone)
+        for value in (summary, start, end, location, attendees, timezone, rrule, alarm)
     ):
         raise ValueError("Provide at least one event field to update.")
 
@@ -272,7 +375,16 @@ def update_event(
         replacements["DTEND"] = f"DTEND{end_param}:{end_value}"
     if location is not None:
         replacements["LOCATION"] = f"LOCATION:{location}" if location else None
+    if rrule is not None:
+        replacements["RRULE"] = f"RRULE:{validate_rrule(rrule)}" if rrule.strip() else None
     attendee_lines = None if attendees is None else _attendee_lines(attendees)
+    alarm_lines: list[str] | None
+    if alarm is None:
+        alarm_lines = None
+    elif alarm.strip():
+        alarm_lines = _alarm_lines(validate_alarm(alarm))
+    else:
+        alarm_lines = []
 
     emitted: set[str] = set()
     sequence_emitted = False
@@ -284,11 +396,15 @@ def update_event(
         upper = line.strip().upper()
         if upper == "BEGIN:VALARM":
             in_alarm = True
-            output.append(line)
+            if alarm_lines is None:
+                output.append(line)
             continue
         if upper == "END:VALARM":
             in_alarm = False
-            output.append(line)
+            if alarm_lines is None:
+                output.append(line)
+            continue
+        if in_alarm and alarm_lines is not None:
             continue
         if upper == "BEGIN:VEVENT":
             in_event = True
@@ -300,6 +416,8 @@ def update_event(
                     output.append(value)
             if attendee_lines is not None:
                 output.extend(attendee_lines)
+            if alarm_lines:
+                output.extend(alarm_lines)
             if not sequence_emitted:
                 output.append(f"SEQUENCE:{current_seq + 1}")
             in_event = False

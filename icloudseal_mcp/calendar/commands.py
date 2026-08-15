@@ -116,11 +116,15 @@ def cmd_reminders(args: argparse.Namespace) -> int:
 
 def cmd_event_add(args: argparse.Namespace) -> int:
     uid = str(uuid.uuid4()).upper()
-    ics = caldav.build_event(
-        uid=uid, summary=args.title, start=args.start, end=args.end,
-        location=args.location or "", all_day=args.all_day,
-        timezone=args.timezone, attendees=args.attendees,
-    )
+    try:
+        ics = caldav.build_event(
+            uid=uid, summary=args.title, start=args.start, end=args.end,
+            location=args.location or "", all_day=args.all_day,
+            timezone=args.timezone, attendees=args.attendees,
+            rrule=args.rrule, alarm=args.alarm,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     console.rule("New event (dry-run)")
     console.print(ics)
     if not args.apply:
@@ -156,10 +160,13 @@ def cmd_event_update(args: argparse.Namespace) -> int:
             args.location,
             args.attendees,
             args.timezone,
+            args.rrule,
+            args.alarm,
         )
     ):
         raise SystemExit(
-            "Provide at least one of --title, --start, --end, --location, --attendees, --timezone."
+            "Provide at least one of --title, --start, --end, --location, "
+            "--attendees, --timezone, --rrule, --alarm."
         )
     session = CalendarSession.connect()
     target = _resolve_one(session.list_events(days=args.days), args.query)
@@ -173,6 +180,8 @@ def cmd_event_update(args: argparse.Namespace) -> int:
             all_day=args.all_day or None,
             timezone=args.timezone,
             attendees=args.attendees,
+            rrule=args.rrule,
+            alarm=args.alarm,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -289,6 +298,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--location")
     sp.add_argument("--timezone", help="IANA timezone for timed events, e.g. America/Los_Angeles")
     sp.add_argument("--attendees", help="Comma-separated attendee emails")
+    sp.add_argument("--rrule", help="Validated RRULE, e.g. FREQ=WEEKLY;COUNT=8")
+    sp.add_argument("--alarm", help="DISPLAY alarm duration, e.g. -PT15M")
     sp.add_argument("--calendar", help="Target calendar name (default: first)")
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--apply", action="store_true")
@@ -311,6 +322,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--location")
     sp.add_argument("--timezone", help="IANA timezone for timed events")
     sp.add_argument("--attendees", help="Comma-separated attendee emails")
+    sp.add_argument("--rrule", help="Replace RRULE; empty string clears it")
+    sp.add_argument("--alarm", help="Replace DISPLAY alarm; empty string clears it")
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--days", type=int, default=365, help="Search window")
     sp.add_argument("--apply", action="store_true")

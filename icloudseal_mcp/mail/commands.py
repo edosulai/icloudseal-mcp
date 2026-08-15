@@ -496,6 +496,133 @@ def cmd_jobs_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_uids(raw: str) -> list[int]:
+    uids: list[int] = []
+    seen: set[int] = set()
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            uid = int(token)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid mail UID: {token!r}") from exc
+        if uid <= 0 or uid in seen:
+            raise SystemExit("Mail UIDs must be positive and unique.")
+        seen.add(uid)
+        uids.append(uid)
+    if not uids:
+        raise SystemExit("Provide at least one mail UID.")
+    if len(uids) > 500:
+        raise SystemExit("Mail mutations are limited to 500 messages.")
+    return uids
+
+
+def _cached_mail_targets(*, folder: str, uids: list[int]) -> list[dict]:
+    with cache.connect() as conn:
+        rows = {
+            int(row["uid"]): dict(row)
+            for row in cache.get_messages(conn, folder=folder, uids=uids)
+        }
+    missing = [uid for uid in uids if uid not in rows]
+    if missing:
+        raise SystemExit(
+            f"UIDs not in the {folder!r} cache: {missing[:20]}. Sync the folder first."
+        )
+    return [rows[uid] for uid in uids]
+
+
+def _print_mail_targets(messages: list[dict]) -> None:
+    for message in messages:
+        subject = (message.get("subject") or "(no subject)")[:60]
+        sender = message.get("sender_email") or ""
+        console.print(f"  UID {message['uid']}: {subject}  <{sender}>")
+
+
+def cmd_mark_read(args: argparse.Namespace) -> int:
+    return _cmd_flags(args, seen=True)
+
+
+def cmd_mark_unread(args: argparse.Namespace) -> int:
+    return _cmd_flags(args, seen=False)
+
+
+def _cmd_flags(args: argparse.Namespace, *, seen: bool) -> int:
+    uids = _parse_uids(args.uids)
+    messages = _cached_mail_targets(folder=args.folder, uids=uids)
+    label = "read" if seen else "unread"
+    console.rule(f"Mark mail {label}" if args.apply else f"Mark mail {label} (dry-run)")
+    console.print(f"Folder: {args.folder}")
+    _print_mail_targets(messages)
+    if not args.apply:
+        console.print(f"[yellow]Dry-run.[/yellow] Add --apply to mark {label}.")
+        return 0
+    creds = auth.load_credentials()
+    with open_session(creds.email, creds.password) as imap:
+        imap.select(args.folder, readonly=False)
+        if seen:
+            imap.add_flags(uids, r"(\Seen)")
+        else:
+            imap.remove_flags(uids, r"(\Seen)")
+        refreshed = list(imap.fetch_metadata(uids))
+    with cache.connect() as conn:
+        cache.upsert_messages(conn, refreshed)
+    console.print(f"[green]Marked {len(uids)} message(s) {label}.[/green]")
+    return 0
+
+
+def cmd_move(args: argparse.Namespace) -> int:
+    uids = _parse_uids(args.uids)
+    messages = _cached_mail_targets(folder=args.folder, uids=uids)
+    dest = args.to.strip()
+    if not dest:
+        raise SystemExit("Destination folder is required.")
+    console.rule("Move mail" if args.apply else "Move mail (dry-run)")
+    console.print(f"From: {args.folder}")
+    console.print(f"To: {dest}")
+    _print_mail_targets(messages)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to move the messages.")
+        return 0
+    creds = auth.load_credentials()
+    with open_session(creds.email, creds.password) as imap:
+        imap.select(args.folder, readonly=False)
+        imap.move(uids, dest)
+    with cache.connect() as conn:
+        removed = cache.remove_cached_messages(conn, folder=args.folder, uids=uids)
+    console.print(
+        f"[green]Moved {len(uids)} message(s) to {dest!r}.[/green] "
+        f"Cache rows removed: {removed}."
+    )
+    return 0
+
+
+def cmd_trash(args: argparse.Namespace) -> int:
+    uids = _parse_uids(args.uids)
+    messages = _cached_mail_targets(folder=args.folder, uids=uids)
+    dest = "Deleted Messages"
+    console.rule("Trash mail" if args.apply else "Trash mail (dry-run)")
+    console.print(f"From: {args.folder}")
+    console.print(f"To: {dest}")
+    _print_mail_targets(messages)
+    if not args.apply:
+        console.print(
+            "[yellow]Dry-run.[/yellow] Add --apply to move the messages to Trash."
+        )
+        return 0
+    creds = auth.load_credentials()
+    with open_session(creds.email, creds.password) as imap:
+        imap.select(args.folder, readonly=False)
+        imap.move(uids, dest)
+    with cache.connect() as conn:
+        removed = cache.remove_cached_messages(conn, folder=args.folder, uids=uids)
+    console.print(
+        f"[green]Moved {len(uids)} message(s) to Trash ({dest}).[/green] "
+        f"Cache rows removed: {removed}."
+    )
+    return 0
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     creds = auth.load_credentials()
     try:
@@ -629,6 +756,36 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--bcc", help="Comma-separated Bcc recipients")
     sp.add_argument("--apply", action="store_true", help="Actually send the message")
     sp.set_defaults(func=cmd_send)
+
+    sp = sub.add_parser("mark-read", help="Mark cached messages as read. Requires --apply.")
+    sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_mark_read)
+
+    sp = sub.add_parser(
+        "mark-unread", help="Mark cached messages as unread. Requires --apply."
+    )
+    sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_mark_unread)
+
+    sp = sub.add_parser("move", help="Move cached messages to another folder. Requires --apply.")
+    sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")
+    sp.add_argument("--to", required=True, help="Destination folder")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_move)
+
+    sp = sub.add_parser(
+        "trash",
+        help="Move cached messages to Deleted Messages. Requires --apply.",
+    )
+    sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_trash)
 
 
 __all__ = ["register"]

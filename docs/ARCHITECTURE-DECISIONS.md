@@ -24,10 +24,10 @@ actions without explicit local approval.
 |---|---|---|
 | Metadata / health | `icloud_doctor`, folder counts, domain list | free |
 | Sensitive read | SMS/iMessage bodies, email bodies, full contacts, notes | free over MCP (content enters agent context); FDA/Automation OS gates apply |
-| Externally visible / mutate | send mail, send iMessage, create/delete contacts, calendar write, drive rm, mail apply | **prepare preview → explicit chat OK → Touch ID / macOS password** |
+| Externally visible / mutate | send mail, flag/move/trash mail, send iMessage, create/update/delete contacts, calendar write, notes update, drive rm, mail apply | **prepare preview → explicit chat OK → Touch ID / macOS password** |
 
 - CLI: dry-run plans + `--apply`.
-- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~51 tools).  
+- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~56 tools).  
   Draft store TTL 10 minutes, single-use; helper `native-approval.swift` compiled to
   `~/Library/Application Support/icloudseal-mcp/bin/native-approval` (mode `0500`).
 - MCP SDK is pinned to the supported major range `mcp>=2,<3`; tool failures use

@@ -24,7 +24,10 @@ from .notes import commands as notes_commands
 from .photos import commands as photos_commands
 
 DOMAINS = {
-    "mail": ("iCloud Mail (IMAP + SMTP): triage, cleanup, gated send.", mail_commands.register),
+    "mail": (
+        "iCloud Mail (IMAP + SMTP): triage, cleanup, gated send/flags/move/trash.",
+        mail_commands.register,
+    ),
     "contacts": (
         "iCloud Contacts (CardDAV): list, search, gated CRUD.",
         contacts_commands.register,
@@ -38,7 +41,7 @@ DOMAINS = {
         messages_commands.register,
     ),
     "notes": (
-        "iCloud Notes (AppleScript): list/read, gated create/delete.",
+        "iCloud Notes (AppleScript): list/read, gated create/update/delete.",
         notes_commands.register,
     ),
     "drive": (

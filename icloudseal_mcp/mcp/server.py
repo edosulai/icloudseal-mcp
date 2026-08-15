@@ -147,7 +147,14 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "mail",
                 "transport": "IMAP + SMTP + local SQLite cache",
                 "reads": ["stats", "sync", "list", "senders", "peek", "triage", "jobs"],
-                "mutations": ["apply plan", "cleanup strict", "send"],
+                "mutations": [
+                    "apply plan",
+                    "cleanup strict",
+                    "send",
+                    "flags",
+                    "move",
+                    "trash",
+                ],
             },
             {
                 "id": "contacts",
@@ -164,6 +171,7 @@ def icloud_list_domains() -> dict[str, Any]:
                     "event-update",
                     "event-rm",
                     "reminder-add",
+                    "reminder-update",
                     "reminder-done",
                     "reminder-rm",
                 ],
@@ -179,7 +187,7 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "notes",
                 "transport": "AppleScript Notes.app",
                 "reads": ["list", "search", "read"],
-                "mutations": ["create", "delete"],
+                "mutations": ["create", "update", "delete"],
             },
             {
                 "id": "drive",
@@ -648,6 +656,103 @@ def icloud_prepare_mail_send(
         return _err(exc)
 
 
+def _mail_mutation_preview(title: str, plan: dict[str, Any]) -> tuple[str, str]:
+    plan_hash = services.canonical_sha256(plan)
+    messages = plan["messages"]
+    uids = ", ".join(str(message["uid"]) for message in messages) or "(none)"
+    subjects = "; ".join(
+        (message.get("subject") or "(no subject)")[:40] for message in messages[:8]
+    )
+    extra = ""
+    if plan["action"] == "flags":
+        extra = f"Flag: {plan['flag']}\n"
+    elif plan.get("destination"):
+        extra = f"Destination: {plan['destination']}\n"
+    preview = (
+        f"{title}\nFolder: {plan['folder']}\nUIDVALIDITY: {plan['uidvalidity']}\n"
+        f"Action: {plan['action']}\n{extra}"
+        f"Messages: {len(messages)}\nUIDs: {uids}\n"
+        f"Subjects: {subjects}\nPlan SHA-256: {plan_hash}"
+    )
+    return preview, plan_hash
+
+
+@_tool(
+    "icloud_prepare_mail_flags",
+    "Prepare marking cached messages read or unread (IMAP \\Seen). "
+    "UIDs must already be in the folder cache. Show exact UIDs before Touch ID.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_flags(
+    uids: list[int] | str,
+    folder: str = "INBOX",
+    seen: bool = True,
+) -> dict[str, Any]:
+    try:
+        plan = services.prepare_mail_flags(folder=folder, uids=uids, seen=seen)
+        title = "Mark mail read" if seen else "Mark mail unread"
+        preview, plan_hash = _mail_mutation_preview(title, plan)
+        return approval.prepare_action(
+            action="mail.flags",
+            target=f"mail:{folder}",
+            preview=preview,
+            payload={"plan": plan, "planSha256": plan_hash},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_mail_move",
+    "Prepare moving cached messages to another IMAP folder. "
+    "UIDs must already be in the source folder cache.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_move(
+    uids: list[int] | str,
+    destination: str,
+    folder: str = "INBOX",
+) -> dict[str, Any]:
+    try:
+        plan = services.prepare_mail_move(
+            folder=folder, uids=uids, destination=destination
+        )
+        preview, plan_hash = _mail_mutation_preview(
+            f"Move mail to {destination}", plan
+        )
+        return approval.prepare_action(
+            action="mail.move",
+            target=f"mail:{folder}->{destination}",
+            preview=preview,
+            payload={"plan": plan, "planSha256": plan_hash},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_mail_trash",
+    "Prepare moving cached messages to Deleted Messages (iCloud Trash, ~30 days). "
+    "UIDs must already be in the folder cache.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_trash(
+    uids: list[int] | str,
+    folder: str = "INBOX",
+) -> dict[str, Any]:
+    try:
+        plan = services.prepare_mail_trash(folder=folder, uids=uids)
+        preview, plan_hash = _mail_mutation_preview("Trash mail", plan)
+        return approval.prepare_action(
+            action="mail.trash",
+            target=f"mail:{folder}->Deleted Messages",
+            preview=preview,
+            payload={"plan": plan, "planSha256": plan_hash},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 @_tool(
     "icloud_prepare_contacts_create",
     "Prepare creating an iCloud contact. Show exact fields before Touch ID.",
@@ -920,6 +1025,37 @@ def icloud_prepare_reminder_rm(query: str) -> dict[str, Any]:
 
 
 @_tool(
+    "icloud_prepare_reminder_update",
+    "Prepare updating a reminder by UID or unique match. "
+    "Only provided fields change; RRULE/VALARM/X-* are preserved. "
+    "Pass due='' to clear the due date.",
+    PREPARE_ANN,
+)
+def icloud_prepare_reminder_update(
+    query: str,
+    title: str | None = None,
+    due: str | None = None,
+) -> dict[str, Any]:
+    try:
+        if title is None and due is None:
+            raise services.ServiceError("Provide at least one of title or due to update.")
+        target = services.prepare_reminder_target(query)
+        preview = (
+            f"Update reminder\nTitle: {target['summary']}\nUID: {target['uid']}\n"
+            f"Due: {target.get('start') or '(none)'}\nETag: {target['etag']}\n"
+            f"New title={title}\nNew due={due}"
+        )
+        return approval.prepare_action(
+            action="calendar.reminder_update",
+            target=f"reminder:{target['uid']}",
+            preview=preview,
+            payload={"target": target, "title": title, "due": due},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
     "icloud_prepare_messages_send",
     "Prepare sending an iMessage/SMS via Messages.app. "
     "Show exact recipient and text before Touch ID.",
@@ -978,6 +1114,37 @@ def icloud_prepare_notes_delete(query: str) -> dict[str, Any]:
             target=f"note:{target['id']}",
             preview=preview,
             payload={"target": target},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_notes_update",
+    "Prepare updating a note title and/or body (body backed up first). "
+    "Provide at least one of title or body.",
+    PREPARE_ANN,
+)
+def icloud_prepare_notes_update(
+    query: str,
+    title: str | None = None,
+    body: str | None = None,
+) -> dict[str, Any]:
+    try:
+        if title is None and body is None:
+            raise services.ServiceError("Provide at least one of title or body to update.")
+        target = services.prepare_note_update(query)
+        preview = (
+            f"Update note\nName: {target['name']}\nID: {target['id']}\n"
+            f"Modified: {target['modified']}\nBody SHA-256: {target['bodySha256']}\n"
+            f"New title={title}\nNew body chars={len(body) if body is not None else '(unchanged)'}\n"
+            "The exact approved body will be backed up first."
+        )
+        return approval.prepare_action(
+            action="notes.update",
+            target=f"note:{target['id']}",
+            preview=preview,
+            payload={"target": target, "title": title, "body": body},
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

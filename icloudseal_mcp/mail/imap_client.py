@@ -310,6 +310,23 @@ class ICloudIMAP:
         if typ != "OK":
             raise IMAPError("STORE \\Deleted failed")
 
+    def add_flags(self, uids: list[int], flags: str) -> None:
+        """Add IMAP flags, e.g. ``(\\Seen)``."""
+        self._store_flags(uids, "+FLAGS", flags)
+
+    def remove_flags(self, uids: list[int], flags: str) -> None:
+        """Remove IMAP flags, e.g. ``(\\Seen)``."""
+        self._store_flags(uids, "-FLAGS", flags)
+
+    def _store_flags(self, uids: list[int], mode: str, flags: str) -> None:
+        if not uids:
+            return
+        assert self._conn is not None
+        uid_set = ",".join(str(u) for u in uids)
+        typ, _ = self._conn.uid("STORE", uid_set, mode, flags)
+        if typ != "OK":
+            raise IMAPError(f"STORE {mode} {flags} failed")
+
     def expunge(self) -> None:
         assert self._conn is not None
         self._conn.expunge()

@@ -16,7 +16,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from icloudseal_mcp import auth
-from icloudseal_mcp.calendar.caldav import complete_reminder, update_event
+from icloudseal_mcp.calendar.caldav import complete_reminder, update_event, update_reminder
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
 from icloudseal_mcp.mail.smtp_client import SMTPError, freeze_send, send_frozen
 from icloudseal_mcp.mcp import approval, services
@@ -126,6 +126,7 @@ def test_notes_values_are_passed_via_argv(monkeypatch: pytest.MonkeyPatch) -> No
 
     applescript.read_note(malicious)
     applescript.create_note(malicious, malicious)
+    applescript.update_note(malicious, title=malicious, body=malicious)
     applescript.delete_note(malicious)
 
     for command in calls:
@@ -205,6 +206,25 @@ def test_mail_plan_hash_and_schema_are_bounded() -> None:
     duplicate = {**plan, "messages": [{"uid": 7}, {"uid": 7}]}
     with pytest.raises(services.ServiceError, match="unique"):
         services.validate_mail_plan(duplicate)
+
+    flags = {
+        "version": 1,
+        "folder": "INBOX",
+        "action": "flags",
+        "flag": "+Seen",
+        "messages": [{"uid": 7, "subject": "Review me"}],
+    }
+    normalized_flags = services.validate_mail_plan(flags)
+    assert normalized_flags["flag"] == "+Seen"
+    assert normalized_flags["destination"] is None
+    with pytest.raises(services.ServiceError, match="Flag plan"):
+        services.validate_mail_plan({**flags, "flag": "\\Flagged"})
+    apply_payload = {
+        "plan": {**normalized_flags, "uidvalidity": 99},
+        "planSha256": services.canonical_sha256({**normalized_flags, "uidvalidity": 99}),
+    }
+    with pytest.raises(services.ServiceError, match="move or delete"):
+        services.exec_mail_apply(apply_payload)
 
 
 def test_mcp_failure_sets_is_error_true() -> None:
@@ -315,6 +335,37 @@ def test_update_event_preserves_recurrence_and_alarm() -> None:
     assert updated.count("SUMMARY:") == 1
     with pytest.raises(ValueError, match="at least one"):
         update_event(raw)
+
+
+def test_update_reminder_preserves_recurrence_and_alarm() -> None:
+    raw = (
+        "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t1\r\nSUMMARY:Buy milk\r\n"
+        "DUE:20260115T180000\r\nRRULE:FREQ=WEEKLY\r\nX-CUSTOM:keep\r\n"
+        "SEQUENCE:4\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:ping\r\n"
+        "END:VALARM\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+
+    updated = update_reminder(raw, summary="Buy oat milk", due="")
+
+    assert "SUMMARY:Buy oat milk" in updated
+    assert "DUE:" not in updated
+    assert "RRULE:FREQ=WEEKLY" in updated
+    assert "X-CUSTOM:keep" in updated
+    assert "BEGIN:VALARM" in updated
+    assert "DESCRIPTION:ping" in updated
+    assert "SEQUENCE:5" in updated
+    assert updated.count("SUMMARY:") == 1
+    with pytest.raises(ValueError, match="at least one"):
+        update_reminder(raw)
+
+
+def test_parse_mail_uids_rejects_empty_and_duplicates() -> None:
+    assert services.parse_mail_uids("7, 8") == [7, 8]
+    assert services.parse_mail_uids([9]) == [9]
+    with pytest.raises(services.ServiceError, match="at least one"):
+        services.parse_mail_uids("")
+    with pytest.raises(services.ServiceError, match="unique"):
+        services.parse_mail_uids("7,7")
 
 
 class _FakeSMTP:

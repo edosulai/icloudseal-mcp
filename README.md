@@ -9,16 +9,16 @@ password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
 > **Status — seven domains live (CLI + MCP)**
-> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, and send.
+> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, send, flags, move, and trash.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
 > - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/update/rm/done.
 > - **Messages / SMS** — read `chat.db` (chats/list/search/export) plus gated AppleScript send.
-> - **Notes (AppleScript)** — list/search/read plus gated create/delete.
+> - **Notes (AppleScript)** — list/search/read plus gated create/update/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
 > - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~51 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~56 tools).
 
 ## Seal family & security model
 
@@ -78,11 +78,11 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Group | Tools |
 |---|---|
 | Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
-| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup/send |
+| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup/send/flags/move/trash |
 | Contacts | list/search/export + prepare create/update/delete |
 | Calendar | list/events/reminders + prepare event add/update/rm and reminder mutations |
 | Messages | chats/list/search/export + prepare send |
-| Notes | list/search/read + prepare create/delete |
+| Notes | list/search/read + prepare create/update/delete |
 | Drive | ls/tree/find/read + prepare put/rm |
 | Photos | stats/albums/list + prepare export |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
@@ -161,6 +161,10 @@ The live file is gitignored and must not be committed.
 | `cleanup strict [--apply]` | Full-sync INBOX, plan/delete known bulk senders |
 | `jobs collect --since 7d --out p.json` | Extract & score job leads (review-only) |
 | `send --to --subject --body [--cc --bcc] [--apply]` | Send via iCloud SMTP (From = Keychain email) |
+| `mark-read --uids 1,2 [--folder INBOX] [--apply]` | Mark cached messages read (`\\Seen`) |
+| `mark-unread --uids 1,2 [--folder INBOX] [--apply]` | Mark cached messages unread |
+| `move --uids 1,2 --to Archive [--folder INBOX] [--apply]` | Move cached messages to another folder |
+| `trash --uids 1,2 [--folder INBOX] [--apply]` | Move cached messages to Deleted Messages |
 
 ## Contacts commands (`icloudseal-mcp contacts …`)
 
@@ -187,6 +191,7 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 | `event-update <query> [--title --start --end --location --all-day] [--apply]` | Patch event (RRULE/VALARM kept; `.ics` backed up) |
 | `event-rm <query> [--apply]` | Delete event (`.ics` backed up) |
 | `reminder-add --title [--due --list] [--apply]` | Create reminder |
+| `reminder-update <query> [--title --due] [--apply]` | Patch reminder (RRULE/VALARM kept; empty `--due` clears it) |
 | `reminder-done <query> [--apply]` | Mark reminder complete |
 | `reminder-rm <query> [--apply]` | Delete reminder (`.ics` backed up) |
 
@@ -212,6 +217,7 @@ Sending is driven through Messages.app via AppleScript; SMS only works with iPho
 |---|---|
 | `list [--limit] [--json]` / `search <q>` / `read <q>` | Browse notes |
 | `create --title … [--body …] [--apply]` | Create a note |
+| `update <q> [--title --body] [--apply]` | Update a note (body backed up first) |
 | `delete <q> [--apply]` | Delete a note (body backed up to `backups/`) |
 
 ## iCloud Drive commands (`icloudseal-mcp drive …`)

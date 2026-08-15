@@ -142,6 +142,26 @@ def list_messages(
     )
 
 
+def get_messages(
+    conn: sqlite3.Connection, *, folder: str, uids: Iterable[int]
+) -> list[sqlite3.Row]:
+    uid_list = list(uids)
+    if not uid_list:
+        return []
+    placeholders = ",".join("?" for _ in uid_list)
+    return list(
+        conn.execute(
+            f"""
+            SELECT uid, folder, sender_email, sender_name, subject, date_iso, size, flags,
+                   list_unsub
+            FROM messages
+            WHERE folder = ? AND uid IN ({placeholders})
+            """,
+            (folder, *uid_list),
+        )
+    )
+
+
 def find_messages(
     conn: sqlite3.Connection,
     *,

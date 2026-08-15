@@ -1,7 +1,7 @@
 """iCloud Notes commands (AppleScript-backed).
 
-Read commands list/search/read notes. Mutating commands (create/delete) preview
-then require ``--apply``; delete backs up the note body first.
+Read commands list/search/read notes. Mutating commands (create/update/delete)
+preview then require ``--apply``; update/delete back up the note body first.
 """
 
 from __future__ import annotations
@@ -120,6 +120,32 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    if args.title is None and args.body is None:
+        raise SystemExit("Provide at least one of --title or --body.")
+    note = _guard(lambda: _resolve_one(args.query))
+    if not note:
+        return 2 if note is None else 0
+    console.rule("Update note" if args.apply else "Update note (dry-run)")
+    console.print(f"Current: [bold]{note.name}[/bold]")
+    if args.title is not None:
+        console.print(f"New title: {args.title}")
+    if args.body is not None:
+        console.print(f"New body chars: {len(args.body)}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to update (body backed up first).")
+        return 0
+    body = applescript.read_note(note.id)
+    root = BACKUP_DIR / f"notes-update-{timestamp_slug()}"
+    root.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() else "_" for c in note.name)[:60] or "note"
+    (root / f"{safe}.txt").write_text(f"{note.name}\n\n{body}")
+    if _guard(lambda: applescript.update_note(note.id, title=args.title, body=args.body)) is None:
+        return 2
+    console.print(f"[green]Updated note[/green] {note.name}. Backup: {root}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("list", help="List notes.")
     sp.add_argument("--limit", type=int, default=0)
@@ -145,6 +171,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("query", help="Note title fragment or id")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_delete)
+
+    sp = sub.add_parser("update", help="Update a note title and/or body. Requires --apply.")
+    sp.add_argument("query", help="Note title fragment or id")
+    sp.add_argument("--title")
+    sp.add_argument("--body")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_update)
 
 
 __all__ = ["register"]

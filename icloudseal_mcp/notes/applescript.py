@@ -91,6 +91,35 @@ end run"""
     _run(script, content_html)
 
 
+def update_note(note_id: str, *, title: str | None = None, body: str | None = None) -> None:
+    if title is None and body is None:
+        raise NotesError("Provide at least one of title or body to update.")
+    body_html = html.escape(body).replace("\n", "<br>") if body is not None else ""
+    script = """on run argv
+    set noteID to item 1 of argv
+    set newTitle to item 2 of argv
+    set newBody to item 3 of argv
+    set hasTitle to item 4 of argv
+    set hasBody to item 5 of argv
+    tell application "Notes"
+        if hasTitle is "1" then
+            set name of note id noteID to newTitle
+        end if
+        if hasBody is "1" then
+            set body of note id noteID to newBody
+        end if
+    end tell
+end run"""
+    _run(
+        script,
+        note_id,
+        title or "",
+        body_html,
+        "1" if title is not None else "0",
+        "1" if body is not None else "0",
+    )
+
+
 def delete_note(note_id: str) -> None:
     script = """on run argv
     set noteID to item 1 of argv

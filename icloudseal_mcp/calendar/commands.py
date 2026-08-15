@@ -202,6 +202,31 @@ def cmd_reminder_rm(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reminder_update(args: argparse.Namespace) -> int:
+    if args.title is None and args.due is None:
+        raise SystemExit("Provide at least one of --title or --due.")
+    session = CalendarSession.connect()
+    target = _resolve_one(session.list_reminders(include_completed=True), args.query)
+    try:
+        ics = caldav.update_reminder(
+            target.raw,
+            summary=args.title,
+            due=args.due,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(f"Would update reminder: [bold]{target.summary}[/bold]")
+    console.rule("Updated iCalendar (preview)")
+    console.print(ics)
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to update (.ics backed up first).")
+        return 0
+    backup = _backup([target], "reminder-update")
+    session.update(target, ics)
+    console.print(f"[green]Updated reminder[/green] {target.uid}. Backup: {backup}")
+    return 0
+
+
 # ---- registration ------------------------------------------------------
 
 
@@ -266,6 +291,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("query")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_reminder_rm)
+
+    sp = sub.add_parser(
+        "reminder-update",
+        help="Update a reminder by UID or unique match. Requires --apply.",
+    )
+    sp.add_argument("query")
+    sp.add_argument("--title")
+    sp.add_argument("--due", help="'YYYY-MM-DD', 'YYYY-MM-DD HH:MM', or '' to clear")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_reminder_update)
 
 
 __all__ = ["register"]

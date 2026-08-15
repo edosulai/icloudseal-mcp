@@ -523,13 +523,16 @@ def validate_mail_plan(
     if not isinstance(folder, str) or not folder.strip() or len(folder) > 255:
         raise ServiceError("Mail plan folder must be a non-empty string.")
     action = plan.get("action")
-    if action not in {"move", "delete"}:
-        raise ServiceError("Mail plan action must be 'move' or 'delete'.")
+    if action not in {"move", "delete", "flags"}:
+        raise ServiceError("Mail plan action must be 'move', 'delete', or 'flags'.")
     destination = plan.get("destination")
     if action == "move" and (
         not isinstance(destination, str) or not destination.strip() or len(destination) > 255
     ):
         raise ServiceError("Move plan requires a valid destination folder.")
+    flag = plan.get("flag")
+    if action == "flags" and flag not in {"+Seen", "-Seen"}:
+        raise ServiceError("Flag plan requires flag '+Seen' or '-Seen'.")
     messages = plan.get("messages")
     if not isinstance(messages, list):
         raise ServiceError("Mail plan is missing a messages list.")
@@ -567,6 +570,8 @@ def validate_mail_plan(
         "destination": destination if action == "move" else None,
         "messages": normalized_messages,
     }
+    if action == "flags":
+        normalized_plan["flag"] = flag
     if require_frozen:
         validity = plan.get("uidvalidity")
         if isinstance(validity, bool):
@@ -637,6 +642,8 @@ def exec_mail_apply(payload: dict[str, Any]) -> dict[str, Any]:
         return {"moved": 0, "note": "Plan has no messages."}
     folder = plan["folder"]
     action = plan["action"]
+    if action not in {"move", "delete"}:
+        raise ServiceError("Approved mail apply plan must move or delete.")
     dest = plan.get("destination")
     uids = [int(m["uid"]) for m in messages]
     if action == "move" and not dest:
@@ -728,6 +735,164 @@ def exec_mail_send(payload: dict[str, Any]) -> dict[str, Any]:
         return send_frozen(frozen, password=creds.password)
     except SMTPError as exc:
         raise ServiceError(str(exc)) from exc
+
+
+def parse_mail_uids(value: list[int] | list[str] | str | int) -> list[int]:
+    if isinstance(value, bool):
+        raise ServiceError("Mail UIDs must be positive integers.")
+    if isinstance(value, int):
+        raw: list[object] = [value]
+    elif isinstance(value, str):
+        raw = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, list):
+        raw = list(value)
+    else:
+        raise ServiceError("Mail UIDs must be a list or comma-separated string.")
+    uids: list[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        if isinstance(item, bool):
+            raise ServiceError("Mail UIDs must be positive integers.")
+        try:
+            uid = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("Mail UIDs must be positive integers.") from exc
+        if uid <= 0 or uid in seen:
+            raise ServiceError("Mail UIDs must be positive and unique.")
+        seen.add(uid)
+        uids.append(uid)
+    if not uids:
+        raise ServiceError("Provide at least one mail UID.")
+    if len(uids) > 500:
+        raise ServiceError("Mail mutations are limited to 500 messages per approval.")
+    return uids
+
+
+def _resolve_cached_mail_messages(
+    *, folder: str, uids: list[int] | list[str] | str | int
+) -> list[dict[str, Any]]:
+    uids = parse_mail_uids(uids)
+    with cache.connect() as conn:
+        rows = {
+            int(row["uid"]): dict(row)
+            for row in cache.get_messages(conn, folder=folder, uids=uids)
+        }
+    missing = [uid for uid in uids if uid not in rows]
+    if missing:
+        raise ServiceError(
+            f"UIDs not in the {folder!r} cache: {missing[:20]}. Sync the folder first."
+        )
+    return [rows[uid] for uid in uids]
+
+
+def prepare_mail_flags(*, folder: str, uids: list[int], seen: bool) -> dict[str, Any]:
+    messages = _resolve_cached_mail_messages(folder=folder, uids=uids)
+    return freeze_mail_plan(
+        {
+            "version": 1,
+            "created_at": now_utc_iso(),
+            "source": "icloudseal-mcp mail flags",
+            "folder": folder,
+            "action": "flags",
+            "destination": None,
+            "flag": "+Seen" if seen else "-Seen",
+            "messages": messages,
+        }
+    )
+
+
+def prepare_mail_move(*, folder: str, uids: list[int], destination: str) -> dict[str, Any]:
+    messages = _resolve_cached_mail_messages(folder=folder, uids=uids)
+    return freeze_mail_plan(
+        {
+            "version": 1,
+            "created_at": now_utc_iso(),
+            "source": "icloudseal-mcp mail move",
+            "folder": folder,
+            "action": "move",
+            "destination": destination,
+            "messages": messages,
+        }
+    )
+
+
+def prepare_mail_trash(*, folder: str, uids: list[int]) -> dict[str, Any]:
+    messages = _resolve_cached_mail_messages(folder=folder, uids=uids)
+    return freeze_mail_plan(
+        {
+            "version": 1,
+            "created_at": now_utc_iso(),
+            "source": "icloudseal-mcp mail trash",
+            "folder": folder,
+            "action": "move",
+            "destination": "Deleted Messages",
+            "messages": messages,
+        }
+    )
+
+
+def _recheck_frozen_mail(imap, plan: dict[str, Any]) -> list[int]:
+    messages = plan["messages"]
+    uids = [int(message["uid"]) for message in messages]
+    if imap.uidvalidity() != plan["uidvalidity"]:
+        raise ServiceError("Mailbox UIDVALIDITY changed after approval; refusing to execute.")
+    current_by_uid = {item.uid: item for item in imap.fetch_metadata(uids)}
+    current = [
+        {
+            "uid": current_by_uid[uid].uid,
+            "sender_name": current_by_uid[uid].sender_name,
+            "sender_email": current_by_uid[uid].sender_email,
+            "subject": current_by_uid[uid].subject,
+            "date_iso": current_by_uid[uid].date_iso,
+            "size": current_by_uid[uid].size,
+        }
+        for uid in uids
+        if uid in current_by_uid
+    ]
+    if current != messages:
+        raise ServiceError("One or more approved mail targets changed; refusing to execute.")
+    return uids
+
+
+def exec_mail_flags(payload: dict[str, Any]) -> dict[str, Any]:
+    plan = validate_mail_plan(payload.get("plan"), require_frozen=True)
+    expected_hash = payload.get("planSha256")
+    if not isinstance(expected_hash, str) or canonical_sha256(plan) != expected_hash:
+        raise ServiceError("Approved mail flag plan failed its integrity check.")
+    if plan["action"] != "flags":
+        raise ServiceError("Approved mail flag plan has the wrong action.")
+    flag = plan.get("flag")
+    creds = auth.load_credentials()
+    with open_session(creds.email, creds.password) as imap:
+        imap.select(plan["folder"], readonly=False)
+        uids = _recheck_frozen_mail(imap, plan)
+        if flag == "+Seen":
+            imap.add_flags(uids, r"(\Seen)")
+        elif flag == "-Seen":
+            imap.remove_flags(uids, r"(\Seen)")
+        else:
+            raise ServiceError("Approved mail flag plan is missing +Seen or -Seen.")
+        refreshed = list(imap.fetch_metadata(uids))
+    with cache.connect() as conn:
+        cache.upsert_messages(conn, refreshed)
+    return {
+        "folder": plan["folder"],
+        "flag": flag,
+        "updated": len(uids),
+        "uids": uids,
+    }
+
+
+def exec_mail_move(payload: dict[str, Any]) -> dict[str, Any]:
+    result = exec_mail_apply(payload)
+    result["action"] = "move"
+    return result
+
+
+def exec_mail_trash(payload: dict[str, Any]) -> dict[str, Any]:
+    result = exec_mail_apply(payload)
+    result["action"] = "trash"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1279,28 @@ def exec_reminder_rm(payload: dict[str, Any]) -> dict[str, Any]:
     return {"uid": target.uid, "summary": target.summary, "backup": str(backup)}
 
 
+def exec_reminder_update(payload: dict[str, Any]) -> dict[str, Any]:
+    session = CalendarSession.connect()
+    target = _cal_from_target(payload["target"])
+    try:
+        ics = caldav.update_reminder(
+            target.raw,
+            summary=payload.get("title"),
+            due=payload.get("due"),
+        )
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    backup = _backup_cal([target], "reminder-update")
+    session.update(target, ics)
+    updated = caldav.parse_calitem(ics, "reminder")
+    return {
+        "uid": target.uid,
+        "summary": updated.summary,
+        "due": updated.start,
+        "backup": str(backup),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
@@ -1249,6 +1436,10 @@ def prepare_note_delete(query: str) -> dict[str, Any]:
     }
 
 
+def prepare_note_update(query: str) -> dict[str, Any]:
+    return prepare_note_delete(query)
+
+
 def exec_notes_delete(payload: dict[str, Any]) -> dict[str, Any]:
     target = payload["target"]
     try:
@@ -1273,6 +1464,43 @@ def exec_notes_delete(payload: dict[str, Any]) -> dict[str, Any]:
     backup.chmod(0o600)
     applescript.delete_note(note.id)
     return {"id": note.id, "name": note.name, "backup": str(root)}
+
+
+def exec_notes_update(payload: dict[str, Any]) -> dict[str, Any]:
+    target = payload["target"]
+    title = payload.get("title")
+    body = payload.get("body")
+    if title is None and body is None:
+        raise ServiceError("Provide at least one of title or body to update.")
+    try:
+        notes = applescript.list_notes()
+    except NotesError as exc:
+        raise ServiceError(str(exc)) from exc
+    hits = [note for note in notes if note.id == target["id"]]
+    if not hits:
+        raise ServiceError(f"Approved note {target['id']!r} no longer exists.")
+    note = hits[0]
+    if note.name != target["name"] or note.modified != target["modified"]:
+        raise ServiceError("Approved note metadata changed; refusing to update.")
+    current_body = applescript.read_note(note.id)
+    if current_body != target["body"] or canonical_sha256(current_body) != target["bodySha256"]:
+        raise ServiceError("Approved note body changed; refusing to update.")
+    root = BACKUP_DIR / f"notes-update-{timestamp_slug()}"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    safe = "".join(c if c.isalnum() else "_" for c in note.name)[:60] or "note"
+    backup = root / f"{safe}.txt"
+    backup.write_text(f"{note.name}\n\n{current_body}", encoding="utf-8")
+    backup.chmod(0o600)
+    try:
+        applescript.update_note(note.id, title=title, body=body)
+    except NotesError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {
+        "id": note.id,
+        "name": title if title is not None else note.name,
+        "backup": str(root),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1622,6 +1850,9 @@ def register_all_executors() -> None:
     approval.register_executor("mail.apply", exec_mail_apply)
     approval.register_executor("mail.cleanup_strict", exec_mail_cleanup_strict)
     approval.register_executor("mail.send", exec_mail_send)
+    approval.register_executor("mail.flags", exec_mail_flags)
+    approval.register_executor("mail.move", exec_mail_move)
+    approval.register_executor("mail.trash", exec_mail_trash)
     approval.register_executor("contacts.create", exec_contacts_create)
     approval.register_executor("contacts.update", exec_contacts_update)
     approval.register_executor("contacts.delete", exec_contacts_delete)
@@ -1631,9 +1862,11 @@ def register_all_executors() -> None:
     approval.register_executor("calendar.reminder_add", exec_reminder_add)
     approval.register_executor("calendar.reminder_done", exec_reminder_done)
     approval.register_executor("calendar.reminder_rm", exec_reminder_rm)
+    approval.register_executor("calendar.reminder_update", exec_reminder_update)
     approval.register_executor("messages.send", exec_messages_send)
     approval.register_executor("notes.create", exec_notes_create)
     approval.register_executor("notes.delete", exec_notes_delete)
+    approval.register_executor("notes.update", exec_notes_update)
     approval.register_executor("drive.put", exec_drive_put)
     approval.register_executor("drive.rm", exec_drive_rm)
     approval.register_executor("photos.export", exec_photos_export)

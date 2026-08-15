@@ -257,6 +257,79 @@ def update_event(
     return "\r\n".join(output).rstrip("\r\n") + "\r\n"
 
 
+def update_reminder(
+    text: str,
+    *,
+    summary: str | None = None,
+    due: str | None = None,
+) -> str:
+    """Patch exposed VTODO fields without erasing recurrence, alarms, or metadata."""
+    if all(value is None for value in (summary, due)):
+        raise ValueError("Provide at least one reminder field to update.")
+
+    stamp = _now_stamp()
+    replacements: dict[str, str | None] = {
+        "DTSTAMP": f"DTSTAMP:{stamp}",
+        "LAST-MODIFIED": f"LAST-MODIFIED:{stamp}",
+    }
+    if summary is not None:
+        replacements["SUMMARY"] = f"SUMMARY:{summary}"
+    if due is not None:
+        if due:
+            due_param, due_value = _ical_dt(due)
+            replacements["DUE"] = f"DUE{due_param}:{due_value}"
+        else:
+            replacements["DUE"] = None
+
+    emitted: set[str] = set()
+    sequence_emitted = False
+    current_seq = 0
+    in_todo = False
+    in_alarm = False
+    output: list[str] = []
+    for line in _unfold(text):
+        upper = line.strip().upper()
+        if upper == "BEGIN:VALARM":
+            in_alarm = True
+            output.append(line)
+            continue
+        if upper == "END:VALARM":
+            in_alarm = False
+            output.append(line)
+            continue
+        if upper == "BEGIN:VTODO":
+            in_todo = True
+            output.append(line)
+            continue
+        if upper == "END:VTODO":
+            for name, value in replacements.items():
+                if name not in emitted and value is not None:
+                    output.append(value)
+            if not sequence_emitted:
+                output.append(f"SEQUENCE:{current_seq + 1}")
+            in_todo = False
+            output.append(line)
+            continue
+        name = line.split(":", 1)[0].split(";", 1)[0].upper()
+        if in_todo and not in_alarm and name == "SEQUENCE":
+            try:
+                current_seq = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                current_seq = 0
+            output.append(f"SEQUENCE:{current_seq + 1}")
+            sequence_emitted = True
+            continue
+        if in_todo and not in_alarm and name in replacements:
+            if name not in emitted:
+                value = replacements[name]
+                if value is not None:
+                    output.append(value)
+                emitted.add(name)
+            continue
+        output.append(line)
+    return "\r\n".join(output).rstrip("\r\n") + "\r\n"
+
+
 def complete_reminder(text: str) -> str:
     """Mark a VTODO complete without erasing recurrence, alarms, or metadata."""
     stamp = _now_stamp()

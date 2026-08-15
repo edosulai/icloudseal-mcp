@@ -14,6 +14,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 MAPS_HOST = "maps.apple.com"
 ALLOWED_DIRFLG = frozenset({"d", "w", "r"})
+ALLOWED_MAP_TYPES = frozenset({"m", "k", "h", "r"})
+MIN_ZOOM = 2
+MAX_ZOOM = 20
 MAX_TEXT_LEN = 200
 
 
@@ -65,11 +68,38 @@ def _pack(url: str, mode: str, query: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def validate_zoom(zoom: object) -> int:
+    if isinstance(zoom, bool) or not isinstance(zoom, (int, float)):
+        raise MapsError("zoom must be a number.")
+    if isinstance(zoom, float) and not zoom.is_integer():
+        raise MapsError("zoom must be an integer.")
+    value = int(zoom)
+    if value < MIN_ZOOM or value > MAX_ZOOM:
+        raise MapsError(f"zoom must be between {MIN_ZOOM} and {MAX_ZOOM}.")
+    return value
+
+
+def validate_map_type(map_type: str) -> str:
+    flag = (map_type or "").strip().lower()
+    if flag not in ALLOWED_MAP_TYPES:
+        raise MapsError("map type must be m (standard), k (satellite), h (hybrid), or r (transit).")
+    return flag
+
+
+def _apply_view(params: dict[str, str], *, zoom: object | None, map_type: str | None) -> None:
+    if zoom is not None:
+        params["z"] = str(validate_zoom(zoom))
+    if map_type:
+        params["t"] = validate_map_type(map_type)
+
+
 def build_search_url(
     query: str,
     *,
     latitude: object | None = None,
     longitude: object | None = None,
+    zoom: object | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, str] = {"q": _clean_text(query, "query")}
     if latitude is not None or longitude is not None:
@@ -77,6 +107,7 @@ def build_search_url(
             raise MapsError("latitude and longitude are both required.")
         lat, lon = validate_coords(latitude, longitude)
         params["ll"] = f"{lat},{lon}"
+    _apply_view(params, zoom=zoom, map_type=map_type)
     url = f"https://{MAPS_HOST}/?{urlencode(params)}"
     return _pack(url, "search", params)
 
@@ -86,6 +117,8 @@ def build_directions_url(
     daddr: str,
     saddr: str | None = None,
     dirflg: str | None = None,
+    zoom: object | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, str] = {"daddr": _clean_text(daddr, "daddr")}
     if saddr:
@@ -95,6 +128,7 @@ def build_directions_url(
         if flag not in ALLOWED_DIRFLG:
             raise MapsError("dirflg must be d (drive), w (walk), or r (transit).")
         params["dirflg"] = flag
+    _apply_view(params, zoom=zoom, map_type=map_type)
     url = f"https://{MAPS_HOST}/?{urlencode(params)}"
     return _pack(url, "directions", params)
 

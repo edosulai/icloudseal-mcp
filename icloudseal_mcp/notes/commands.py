@@ -88,15 +88,50 @@ def cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_accounts(args: argparse.Namespace) -> int:
+    accounts = _guard(applescript.list_accounts)
+    if accounts is None:
+        return 2
+    if args.json:
+        print(json.dumps(accounts, indent=2))
+        return 0
+    table = Table(title=f"Notes accounts ({len(accounts)})")
+    table.add_column("Account")
+    for name in accounts:
+        table.add_row(name)
+    console.print(table)
+    return 0
+
+
+def cmd_folders(args: argparse.Namespace) -> int:
+    folders = _guard(applescript.list_folders)
+    if folders is None:
+        return 2
+    if args.json:
+        print(json.dumps([folder.__dict__ for folder in folders], indent=2))
+        return 0
+    table = Table(title=f"Notes folders ({len(folders)})")
+    table.add_column("Account")
+    table.add_column("Folder")
+    for folder in folders:
+        table.add_row(folder.account, folder.name)
+    console.print(table)
+    return 0
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     console.rule("New note (dry-run)")
     console.print(f"[bold]{args.title}[/bold]")
+    if args.folder:
+        console.print(f"Folder: {args.folder}")
     if args.body:
         console.print(args.body)
     if not args.apply:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to create.")
         return 0
-    if _guard(lambda: applescript.create_note(args.title, args.body or "")) is None:
+    if _guard(
+        lambda: applescript.create_note(args.title, args.body or "", folder=args.folder)
+    ) is None:
         return 2
     console.print(f"[green]Created note[/green] {args.title}")
     return 0
@@ -161,9 +196,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("query", help="Note title fragment or id")
     sp.set_defaults(func=cmd_read)
 
+    sp = sub.add_parser("accounts", help="List Notes.app accounts.")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_accounts)
+
+    sp = sub.add_parser("folders", help="List Notes.app folders.")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_folders)
+
     sp = sub.add_parser("create", help="Create a note. Requires --apply.")
     sp.add_argument("--title", required=True)
     sp.add_argument("--body")
+    sp.add_argument("--folder", help="iCloud folder name (create stays iCloud-only).")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_create)
 

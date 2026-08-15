@@ -23,18 +23,27 @@ from ..common import parse_age_cutoff, parse_since, write_json_file
 from ..contacts import carddav
 from ..contacts.carddav import Contact, ContactsSession
 from ..drive import commands as drive_commands
+from ..health import health_status
 from ..mail import cache, cleanup, jobs
-from ..mail.imap_client import open_session
-from ..mail.smtp_client import SMTPError, freeze_send, send_frozen
+from ..mail.imap_client import IMAPError, open_session
+from ..mail.smtp_client import (
+    MAX_ATTACHMENT_BYTES,
+    SMTPError,
+    freeze_send,
+    send_frozen,
+)
 from ..maps import urls as maps_urls
 from ..maps.urls import MapsError
 from ..messages import chatdb
+from ..messages import commands as messages_commands
 from ..messages.chatdb import MessagesAccessError
 from ..music import applescript as music_script
 from ..music.applescript import MusicError
 from ..notes import applescript
 from ..notes.applescript import NotesError
+from ..ops import generate_mail_cleanup_plist, write_mail_cleanup_plist
 from ..paths import (
+    APP_DIR,
     BACKUP_DIR,
     default_plan_path,
     export_path,
@@ -42,7 +51,9 @@ from ..paths import (
     plan_path,
     timestamp_slug,
 )
+from ..photos import applescript as photos_script
 from ..photos import photosdb
+from ..photos.applescript import PhotosScriptError
 from ..photos.photosdb import PhotosAccessError
 from ..safari import applescript as safari_script
 from ..safari.applescript import SafariError
@@ -51,6 +62,28 @@ from ..weather.client import WeatherError
 
 DRIVE_ROOT = drive_commands.DRIVE_ROOT
 MAX_READ_BYTES = drive_commands.MAX_READ_BYTES
+
+SEND_HASH_KEYS = (
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "body",
+    "messageId",
+    "inReplyTo",
+    "references",
+    "attachments",
+)
+ALLOWED_MAIL_FLAGS = {
+    "+Seen": r"(\Seen)",
+    "-Seen": r"(\Seen)",
+    "+Flagged": r"(\Flagged)",
+    "-Flagged": r"(\Flagged)",
+    "+Answered": r"(\Answered)",
+    "-Answered": r"(\Answered)",
+}
+MAIL_FLAG_ADD = frozenset({"+Seen", "+Flagged", "+Answered"})
 
 
 class ServiceError(RuntimeError):
@@ -154,6 +187,7 @@ def doctor() -> dict[str, Any]:
     photos = _probe_photos()
     safari = _probe_safari()
     music = _probe_music()
+    health = health_status()
     drive = {
         "root": str(DRIVE_ROOT),
         "exists": DRIVE_ROOT.exists(),
@@ -210,6 +244,7 @@ def doctor() -> dict[str, Any]:
                 "transport": "maps.apple.com URL",
                 "ready": True,
             },
+            "health": health,
         },
         "workflow": {
             "firstCall": "icloud_doctor",
@@ -590,8 +625,10 @@ def validate_mail_plan(
     ):
         raise ServiceError("Move plan requires a valid destination folder.")
     flag = plan.get("flag")
-    if action == "flags" and flag not in {"+Seen", "-Seen"}:
-        raise ServiceError("Flag plan requires flag '+Seen' or '-Seen'.")
+    if action == "flags" and flag not in ALLOWED_MAIL_FLAGS:
+        raise ServiceError(
+            "Flag plan requires +Seen/-Seen, +Flagged/-Flagged, or +Answered/-Answered."
+        )
     messages = plan.get("messages")
     if not isinstance(messages, list):
         raise ServiceError("Mail plan is missing a messages list.")
@@ -742,6 +779,31 @@ def exec_mail_cleanup_strict(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _freeze_local_attachments(paths: list[str] | str | None) -> list[dict[str, Any]]:
+    if paths is None:
+        return []
+    raw = [paths] if isinstance(paths, str) else list(paths)
+    snapshots: list[dict[str, Any]] = []
+    for item in raw:
+        source = Path(str(item)).expanduser().resolve()
+        if not source.is_file():
+            raise ServiceError(f"Attachment not found: {source}")
+        size = source.stat().st_size
+        if size <= 0 or size > MAX_ATTACHMENT_BYTES:
+            raise ServiceError(
+                f"Attachment {source.name!r} exceeds the {MAX_ATTACHMENT_BYTES} byte cap."
+            )
+        snapshots.append(
+            {
+                "path": str(source),
+                "name": source.name,
+                "size": size,
+                "sha256": _file_sha256(source),
+            }
+        )
+    return snapshots
+
+
 def prepare_mail_send(
     *,
     to: list[str] | str,
@@ -749,6 +811,9 @@ def prepare_mail_send(
     body: str,
     cc: list[str] | str | None = None,
     bcc: list[str] | str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    attachments: list[str] | str | None = None,
 ) -> dict[str, Any]:
     creds = auth.load_credentials()
     try:
@@ -759,12 +824,13 @@ def prepare_mail_send(
             body=body,
             cc=cc,
             bcc=bcc,
+            in_reply_to=in_reply_to,
+            references=references,
+            attachments=_freeze_local_attachments(attachments),
         )
     except SMTPError as exc:
         raise ServiceError(str(exc)) from exc
-    frozen["planSha256"] = canonical_sha256(
-        {key: frozen[key] for key in ("from", "to", "cc", "bcc", "subject", "body", "messageId")}
-    )
+    frozen["planSha256"] = canonical_sha256({key: frozen[key] for key in SEND_HASH_KEYS})
     return frozen
 
 
@@ -779,12 +845,13 @@ def exec_mail_send(payload: dict[str, Any]) -> dict[str, Any]:
             cc=payload.get("cc"),
             bcc=payload.get("bcc"),
             message_id=payload.get("messageId"),
+            in_reply_to=payload.get("inReplyTo"),
+            references=payload.get("references"),
+            attachments=payload.get("attachments"),
         )
     except SMTPError as exc:
         raise ServiceError(str(exc)) from exc
-    material = {
-        key: frozen[key] for key in ("from", "to", "cc", "bcc", "subject", "body", "messageId")
-    }
+    material = {key: frozen[key] for key in SEND_HASH_KEYS}
     if not isinstance(expected, str) or canonical_sha256(material) != expected:
         raise ServiceError("Approved mail send failed its integrity check.")
     creds = auth.load_credentials()
@@ -844,7 +911,26 @@ def _resolve_cached_mail_messages(
     return [rows[uid] for uid in uids]
 
 
-def prepare_mail_flags(*, folder: str, uids: list[int], seen: bool) -> dict[str, Any]:
+def prepare_mail_flags(
+    *,
+    folder: str,
+    uids: list[int],
+    seen: bool | None = None,
+    flag: str | None = None,
+) -> dict[str, Any]:
+    token = flag
+    if token is None:
+        if seen is None:
+            raise ServiceError("Provide flag or seen.")
+        token = "+Seen" if seen else "-Seen"
+    elif seen is not None:
+        implied = "+Seen" if seen else "-Seen"
+        if token != implied:
+            raise ServiceError("flag and seen disagree.")
+    if token not in ALLOWED_MAIL_FLAGS:
+        raise ServiceError(
+            "flag must be +Seen/-Seen, +Flagged/-Flagged, or +Answered/-Answered."
+        )
     messages = _resolve_cached_mail_messages(folder=folder, uids=uids)
     return freeze_mail_plan(
         {
@@ -854,7 +940,7 @@ def prepare_mail_flags(*, folder: str, uids: list[int], seen: bool) -> dict[str,
             "folder": folder,
             "action": "flags",
             "destination": None,
-            "flag": "+Seen" if seen else "-Seen",
+            "flag": token,
             "messages": messages,
         }
     )
@@ -925,12 +1011,13 @@ def exec_mail_flags(payload: dict[str, Any]) -> dict[str, Any]:
     with open_session(creds.email, creds.password) as imap:
         imap.select(plan["folder"], readonly=False)
         uids = _recheck_frozen_mail(imap, plan)
-        if flag == "+Seen":
-            imap.add_flags(uids, r"(\Seen)")
-        elif flag == "-Seen":
-            imap.remove_flags(uids, r"(\Seen)")
+        imap_flag = ALLOWED_MAIL_FLAGS.get(flag)
+        if imap_flag is None:
+            raise ServiceError("Approved mail flag plan has an unknown flag.")
+        if flag in MAIL_FLAG_ADD:
+            imap.add_flags(uids, imap_flag)
         else:
-            raise ServiceError("Approved mail flag plan is missing +Seen or -Seen.")
+            imap.remove_flags(uids, imap_flag)
         refreshed = list(imap.fetch_metadata(uids))
     with cache.connect() as conn:
         cache.upsert_messages(conn, refreshed)
@@ -945,6 +1032,61 @@ def exec_mail_flags(payload: dict[str, Any]) -> dict[str, Any]:
 def exec_mail_move(payload: dict[str, Any]) -> dict[str, Any]:
     result = exec_mail_apply(payload)
     result["action"] = "move"
+    return result
+
+
+def prepare_mail_create_folder(folder: str) -> dict[str, Any]:
+    name = (folder or "").strip()
+    if not name or len(name) > 255:
+        raise ServiceError("Folder name must be a non-empty string.")
+    if any(ch in name for ch in "\r\n\x00"):
+        raise ServiceError("Folder name must not contain control characters.")
+    return {"folder": name}
+
+
+def exec_mail_create_folder(payload: dict[str, Any]) -> dict[str, Any]:
+    folder = str(payload.get("folder") or "").strip()
+    if not folder:
+        raise ServiceError("Approved mail folder is missing.")
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.create_folder(folder)
+    except IMAPError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"folder": folder, "created": True}
+
+
+def mail_list_attachments(*, folder: str, uid: int) -> list[dict[str, Any]]:
+    parse_mail_uids(uid)
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.select(folder, readonly=True)
+            return imap.list_attachments(uid)
+    except IMAPError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def mail_export_attachment(
+    *, folder: str, uid: int, index: int, dest: str
+) -> dict[str, Any]:
+    parse_mail_uids(uid)
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ServiceError("Attachment index must be a non-negative integer.")
+    try:
+        out = export_path(dest)
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    if out.exists():
+        raise ServiceError(f"Export output already exists: {out}")
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.select(folder, readonly=True)
+            result = imap.export_attachment(uid, index, str(out))
+    except IMAPError as exc:
+        raise ServiceError(str(exc)) from exc
     return result
 
 
@@ -1253,14 +1395,19 @@ def prepare_reminder_target(query: str) -> dict[str, Any]:
 
 def exec_event_add(payload: dict[str, Any]) -> dict[str, Any]:
     uid = payload["uid"]
-    ics = caldav.build_event(
-        uid=uid,
-        summary=payload["title"],
-        start=payload["start"],
-        end=payload.get("end"),
-        location=payload.get("location") or "",
-        all_day=bool(payload.get("allDay")),
-    )
+    try:
+        ics = caldav.build_event(
+            uid=uid,
+            summary=payload["title"],
+            start=payload["start"],
+            end=payload.get("end"),
+            location=payload.get("location") or "",
+            all_day=bool(payload.get("allDay")),
+            timezone=payload.get("timezone"),
+            attendees=payload.get("attendees"),
+        )
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
     session = CalendarSession.connect()
     collection = payload["collection"]
     href = session.put_item(collection["url"], uid, ics)
@@ -1296,6 +1443,8 @@ def exec_event_update(payload: dict[str, Any]) -> dict[str, Any]:
             end=payload.get("end"),
             location=payload.get("location"),
             all_day=payload.get("allDay"),
+            timezone=payload.get("timezone"),
+            attendees=payload.get("attendees"),
         )
     except ValueError as exc:
         raise ServiceError(str(exc)) from exc
@@ -1405,33 +1554,45 @@ def messages_export(*, chat: str, path: str, limit: int = 1000) -> dict[str, Any
     return {"path": str(out), "count": len(msgs)}
 
 
+def prepare_messages_send(
+    *,
+    to: str,
+    text: str,
+    service: str = "imessage",
+    attachment: str | None = None,
+) -> dict[str, Any]:
+    if service not in {"imessage", "sms"}:
+        raise ServiceError("service must be imessage or sms")
+    if not text.strip():
+        raise ServiceError("text cannot be empty")
+    if len(text) > 10_000:
+        raise ServiceError("text exceeds 10,000 characters")
+    frozen: dict[str, Any] = {"to": to, "text": text, "service": service}
+    if attachment:
+        snaps = _freeze_local_attachments([attachment])
+        frozen["attachment"] = snaps[0]
+    return frozen
+
+
 def exec_messages_send(payload: dict[str, Any]) -> dict[str, Any]:
     to = payload["to"]
     text = payload["text"]
     service = payload.get("service") or "imessage"
-    script = """on run argv
-    set recipient to item 1 of argv
-    set messageText to item 2 of argv
-    set requestedService to item 3 of argv
-    tell application "Messages"
-        if requestedService is "imessage" then
-            set targetService to 1st account whose service type = iMessage
-        else
-            set targetService to 1st account whose service type = SMS
-        end if
-        set targetBuddy to participant recipient of targetService
-        send messageText to targetBuddy
-    end tell
-end run"""
-    result = subprocess.run(
-        ["osascript", "-e", script, "--", to, text, service],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise ServiceError(result.stderr.strip() or "osascript failed")
-    return {"to": to, "service": service, "characters": len(text)}
+    attachment = payload.get("attachment")
+    path = None
+    if attachment:
+        src = Path(attachment["path"]).expanduser().resolve()
+        if not _snapshot_matches(src, attachment):
+            raise ServiceError("Approved Messages attachment changed; refusing to send.")
+        path = str(src)
+    try:
+        messages_commands._applescript_send(to, text, service=service, attachment=path)
+    except Exception as exc:  # noqa: BLE001
+        raise ServiceError(str(exc)) from exc
+    result: dict[str, Any] = {"to": to, "service": service, "characters": len(text)}
+    if path:
+        result["attachment"] = attachment["name"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1474,14 +1635,29 @@ def notes_read(*, query: str) -> dict[str, Any]:
     return {"id": note.id, "name": note.name, "modified": note.modified, "body": body}
 
 
+def notes_accounts() -> list[str]:
+    try:
+        return applescript.list_accounts()
+    except NotesError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def notes_folders() -> list[dict[str, Any]]:
+    try:
+        return [folder.__dict__ for folder in applescript.list_folders()]
+    except NotesError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
 def exec_notes_create(payload: dict[str, Any]) -> dict[str, Any]:
     title = payload["title"]
     body = payload.get("body") or ""
+    folder = payload.get("folder") or None
     try:
-        applescript.create_note(title, body)
+        applescript.create_note(title, body, folder=folder)
     except NotesError as exc:
         raise ServiceError(str(exc)) from exc
-    return {"title": title, "bodyChars": len(body)}
+    return {"title": title, "bodyChars": len(body), "folder": folder}
 
 
 def prepare_note_delete(query: str) -> dict[str, Any]:
@@ -1686,6 +1862,30 @@ def prepare_drive_put(local: str, dest: str, *, overwrite: bool) -> dict[str, An
     }
 
 
+def prepare_drive_mkdir(path: str) -> dict[str, Any]:
+    dest = _drive_resolve(path)
+    if dest == DRIVE_ROOT.resolve():
+        raise ServiceError("Refusing to mkdir the iCloud Drive root.")
+    if dest.exists():
+        raise ServiceError(f"Already exists: {_drive_rel(dest)}")
+    return {
+        "path": str(dest),
+        "relative": _drive_rel(dest),
+    }
+
+
+def exec_drive_mkdir(payload: dict[str, Any]) -> dict[str, Any]:
+    dest = _drive_resolve(payload["path"])
+    if str(dest) != payload["path"]:
+        raise ServiceError("Approved iCloud Drive destination changed through a symlink.")
+    if dest == DRIVE_ROOT.resolve():
+        raise ServiceError("Refusing to mkdir the iCloud Drive root.")
+    if dest.exists():
+        raise ServiceError(f"Already exists: {_drive_rel(dest)}")
+    dest.mkdir(parents=True, exist_ok=False)
+    return {"path": payload["relative"], "created": True}
+
+
 def prepare_drive_remove(path: str) -> dict[str, Any]:
     target = _drive_resolve(path)
     if target == DRIVE_ROOT.resolve():
@@ -1859,6 +2059,41 @@ def prepare_photos_export(
     }
 
 
+def prepare_photos_favorite(filename: str, *, favorite: bool) -> dict[str, Any]:
+    name = (filename or "").strip()
+    if not name:
+        raise ServiceError("filename is required.")
+    return {"filename": name, "favorite": bool(favorite)}
+
+
+def exec_photos_favorite(payload: dict[str, Any]) -> dict[str, Any]:
+    filename = str(payload.get("filename") or "")
+    favorite = bool(payload.get("favorite"))
+    try:
+        photos_script.set_favorite(filename, favorite=favorite)
+    except PhotosScriptError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"filename": filename, "favorite": favorite, "ok": True}
+
+
+def prepare_photos_album_add(filename: str, album: str) -> dict[str, Any]:
+    name = (filename or "").strip()
+    album_name = (album or "").strip()
+    if not name or not album_name:
+        raise ServiceError("filename and album are required.")
+    return {"filename": name, "album": album_name}
+
+
+def exec_photos_album_add(payload: dict[str, Any]) -> dict[str, Any]:
+    filename = str(payload.get("filename") or "")
+    album = str(payload.get("album") or "")
+    try:
+        photos_script.add_to_album(filename, album)
+    except PhotosScriptError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"filename": filename, "album": album, "ok": True}
+
+
 def safari_list_tabs() -> list[dict[str, Any]]:
     try:
         tabs = safari_script.list_tabs()
@@ -1921,6 +2156,105 @@ def exec_safari_open_url(payload: dict[str, Any]) -> dict[str, Any]:
     return {"url": canonical, "target": target, "opened": True}
 
 
+def prepare_safari_search(query: str, *, target: str = "new_tab") -> dict[str, Any]:
+    try:
+        url = safari_script.search_url(query)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return prepare_safari_open_url(url, target=target)
+
+
+def prepare_safari_close_tab(
+    *,
+    window_index: int,
+    tab_index: int,
+) -> dict[str, Any]:
+    if isinstance(window_index, bool) or not isinstance(window_index, int) or window_index < 1:
+        raise ServiceError("window_index must be a positive integer.")
+    if isinstance(tab_index, bool) or not isinstance(tab_index, int) or tab_index < 1:
+        raise ServiceError("tab_index must be a positive integer.")
+    tabs = safari_list_tabs()
+    match = next(
+        (
+            tab
+            for tab in tabs
+            if tab["window_index"] == window_index and tab["tab_index"] == tab_index
+        ),
+        None,
+    )
+    if match is None:
+        raise ServiceError(f"No Safari tab at window {window_index} tab {tab_index}.")
+    return {
+        "window_index": window_index,
+        "tab_index": tab_index,
+        "name": match["name"],
+        "url": match["url"],
+    }
+
+
+def exec_safari_close_tab(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        safari_script.close_tab(
+            window_index=int(payload["window_index"]),
+            tab_index=int(payload["tab_index"]),
+            name=str(payload.get("name") or ""),
+            url=str(payload.get("url") or ""),
+        )
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {
+        "window_index": payload["window_index"],
+        "tab_index": payload["tab_index"],
+        "closed": True,
+    }
+
+
+def safari_page_text(
+    *,
+    window_index: int | None = None,
+    tab_index: int | None = None,
+) -> dict[str, Any]:
+    try:
+        if window_index is None or tab_index is None:
+            current = safari_current_tab()
+            if not current.get("running"):
+                raise ServiceError("Safari is not running.")
+            window_index = int(current["window_index"])
+            tab_index = int(current["tab_index"])
+            name = str(current.get("name") or "")
+            url = str(current.get("url") or "")
+        else:
+            tabs = safari_list_tabs()
+            match = next(
+                (
+                    tab
+                    for tab in tabs
+                    if tab["window_index"] == window_index and tab["tab_index"] == tab_index
+                ),
+                None,
+            )
+            if match is None:
+                raise ServiceError(f"No Safari tab at window {window_index} tab {tab_index}.")
+            name = str(match["name"])
+            url = str(match["url"])
+        text = safari_script.page_text(
+            window_index=window_index,
+            tab_index=tab_index,
+            name=name,
+            url=url,
+        )
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {
+        "window_index": window_index,
+        "tab_index": tab_index,
+        "name": name,
+        "url": url,
+        "chars": len(text),
+        "text": text,
+    }
+
+
 def music_now_playing() -> dict[str, Any]:
     try:
         return music_script.now_playing().to_dict()
@@ -1958,6 +2292,75 @@ def exec_music_previous(payload: dict[str, Any]) -> dict[str, Any]:
     return exec_music_playback({**payload, "action": "previous"})
 
 
+def prepare_music_volume(level: int) -> dict[str, Any]:
+    if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 100:
+        raise ServiceError("volume must be an integer from 0 to 100.")
+    return {"level": level, "nowPlaying": music_now_playing()}
+
+
+def exec_music_volume(payload: dict[str, Any]) -> dict[str, Any]:
+    level = payload.get("level")
+    if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 100:
+        raise ServiceError("volume must be an integer from 0 to 100.")
+    try:
+        music_script.set_volume(level)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"level": level, "ok": True}
+
+
+def prepare_music_shuffle(mode: str) -> dict[str, Any]:
+    if mode not in music_script.ALLOWED_SHUFFLE:
+        raise ServiceError("shuffle must be off, songs, albums, or groupings.")
+    return {"mode": mode, "nowPlaying": music_now_playing()}
+
+
+def exec_music_shuffle(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("mode") or "")
+    if mode not in music_script.ALLOWED_SHUFFLE:
+        raise ServiceError("shuffle must be off, songs, albums, or groupings.")
+    try:
+        music_script.set_shuffle(mode)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"mode": mode, "ok": True}
+
+
+def prepare_music_repeat(mode: str) -> dict[str, Any]:
+    if mode not in music_script.ALLOWED_REPEAT:
+        raise ServiceError("repeat must be off, one, or all.")
+    return {"mode": mode, "nowPlaying": music_now_playing()}
+
+
+def exec_music_repeat(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("mode") or "")
+    if mode not in music_script.ALLOWED_REPEAT:
+        raise ServiceError("repeat must be off, one, or all.")
+    try:
+        music_script.set_repeat(mode)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"mode": mode, "ok": True}
+
+
+def prepare_music_play(query: str) -> dict[str, Any]:
+    candidate = (query or "").strip()
+    if not candidate:
+        raise ServiceError("query is required.")
+    return {"query": candidate, "nowPlaying": music_now_playing()}
+
+
+def exec_music_play(payload: dict[str, Any]) -> dict[str, Any]:
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise ServiceError("query is required.")
+    try:
+        music_script.play_by_name(query)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"query": query, "ok": True}
+
+
 def weather_forecast(
     *,
     place: str | None = None,
@@ -1965,6 +2368,7 @@ def weather_forecast(
     longitude: float | None = None,
     days: int = weather_client.DEFAULT_DAYS,
     temperature_unit: str = "celsius",
+    hourly: bool = False,
 ) -> dict[str, Any]:
     try:
         return weather_client.forecast(
@@ -1973,6 +2377,7 @@ def weather_forecast(
             longitude=longitude,
             days=days,
             temperature_unit=temperature_unit,
+            hourly=hourly,
         )
     except WeatherError as exc:
         raise ServiceError(str(exc)) from exc
@@ -1983,10 +2388,16 @@ def maps_search(
     *,
     latitude: float | None = None,
     longitude: float | None = None,
+    zoom: int | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     try:
         return maps_urls.build_search_url(
-            query, latitude=latitude, longitude=longitude
+            query,
+            latitude=latitude,
+            longitude=longitude,
+            zoom=zoom,
+            map_type=map_type,
         )
     except MapsError as exc:
         raise ServiceError(str(exc)) from exc
@@ -2000,6 +2411,8 @@ def prepare_maps_open(
     saddr: str | None = None,
     daddr: str | None = None,
     dirflg: str | None = None,
+    zoom: int | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     has_query = bool((query or "").strip())
     has_dest = bool((daddr or "").strip())
@@ -2010,13 +2423,21 @@ def prepare_maps_open(
             if saddr or dirflg:
                 raise ServiceError("saddr/dirflg apply only to directions.")
             built = maps_urls.build_search_url(
-                query or "", latitude=latitude, longitude=longitude
+                query or "",
+                latitude=latitude,
+                longitude=longitude,
+                zoom=zoom,
+                map_type=map_type,
             )
         else:
             if latitude is not None or longitude is not None:
                 raise ServiceError("latitude/longitude apply only to search.")
             built = maps_urls.build_directions_url(
-                daddr=daddr or "", saddr=saddr, dirflg=dirflg
+                daddr=daddr or "",
+                saddr=saddr,
+                dirflg=dirflg,
+                zoom=zoom,
+                map_type=map_type,
             )
         canonical = maps_urls.validate_maps_url(built["url"])
     except MapsError as exc:
@@ -2027,6 +2448,8 @@ def prepare_maps_open(
 def _rebuild_maps_url(payload: dict[str, Any]) -> dict[str, Any]:
     mode = payload.get("mode")
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    zoom = query.get("z")
+    map_type = query.get("t")
     if mode == "search":
         ll = query.get("ll")
         latitude = longitude = None
@@ -2043,12 +2466,16 @@ def _rebuild_maps_url(payload: dict[str, Any]) -> dict[str, Any]:
             str(query.get("q") or ""),
             latitude=latitude,
             longitude=longitude,
+            zoom=int(zoom) if zoom is not None else None,
+            map_type=map_type,
         )
     if mode == "directions":
         return maps_urls.build_directions_url(
             daddr=str(query.get("daddr") or ""),
             saddr=query.get("saddr"),
             dirflg=query.get("dirflg"),
+            zoom=int(zoom) if zoom is not None else None,
+            map_type=map_type,
         )
     raise ServiceError("Approved Maps payload is missing mode.")
 
@@ -2109,6 +2536,43 @@ def exec_photos_export(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def health_read() -> dict[str, Any]:
+    return health_status()
+
+
+def prepare_ops_cleanup_agent(*, interval: int = 86_400) -> dict[str, Any]:
+    dest = APP_DIR / "LaunchAgents" / "dev.icloudseal.mail-cleanup.plist"
+    try:
+        plist = generate_mail_cleanup_plist(interval=interval)
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {
+        "destination": str(dest),
+        "interval": interval,
+        "label": "dev.icloudseal.mail-cleanup",
+        "plistSha256": canonical_sha256(plist),
+    }
+
+
+def exec_ops_cleanup_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    dest = Path(payload["destination"])
+    if dest != APP_DIR / "LaunchAgents" / "dev.icloudseal.mail-cleanup.plist":
+        raise ServiceError("Approved LaunchAgent destination changed.")
+    try:
+        plist = generate_mail_cleanup_plist(interval=int(payload["interval"]))
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    if canonical_sha256(plist) != payload.get("plistSha256"):
+        raise ServiceError("Approved LaunchAgent template changed.")
+    written = write_mail_cleanup_plist(dest, interval=int(payload["interval"]))
+    return {
+        "path": str(written),
+        "written": True,
+        "loaded": False,
+        "note": "Plist written only. launchctl load was not run.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Register mutation executors
 # ---------------------------------------------------------------------------
@@ -2122,6 +2586,7 @@ def register_all_executors() -> None:
     approval.register_executor("mail.flags", exec_mail_flags)
     approval.register_executor("mail.move", exec_mail_move)
     approval.register_executor("mail.trash", exec_mail_trash)
+    approval.register_executor("mail.create_folder", exec_mail_create_folder)
     approval.register_executor("contacts.create", exec_contacts_create)
     approval.register_executor("contacts.update", exec_contacts_update)
     approval.register_executor("contacts.delete", exec_contacts_delete)
@@ -2137,10 +2602,19 @@ def register_all_executors() -> None:
     approval.register_executor("notes.delete", exec_notes_delete)
     approval.register_executor("notes.update", exec_notes_update)
     approval.register_executor("drive.put", exec_drive_put)
+    approval.register_executor("drive.mkdir", exec_drive_mkdir)
     approval.register_executor("drive.rm", exec_drive_rm)
     approval.register_executor("photos.export", exec_photos_export)
+    approval.register_executor("photos.favorite", exec_photos_favorite)
+    approval.register_executor("photos.album_add", exec_photos_album_add)
     approval.register_executor("safari.open_url", exec_safari_open_url)
+    approval.register_executor("safari.close_tab", exec_safari_close_tab)
     approval.register_executor("music.playpause", exec_music_playpause)
     approval.register_executor("music.next", exec_music_next)
     approval.register_executor("music.previous", exec_music_previous)
+    approval.register_executor("music.volume", exec_music_volume)
+    approval.register_executor("music.shuffle", exec_music_shuffle)
+    approval.register_executor("music.repeat", exec_music_repeat)
+    approval.register_executor("music.play", exec_music_play)
     approval.register_executor("maps.open", exec_maps_open)
+    approval.register_executor("ops.cleanup_agent", exec_ops_cleanup_agent)

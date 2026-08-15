@@ -33,11 +33,13 @@ Before sensitive work:
    duplicate mutate blindly.
 6. Messages/Photos need Full Disk Access. Notes/Safari/Music need Automation.
    Drive is local CloudDocs. Weather uses Open-Meteo (no WeatherKit). Maps
-   search is a local URL; opening Maps.app is gated.
+   search is a local URL; opening Maps.app is gated. Health is fail-closed
+   until a signed HealthKit helper exists.
 
 Domains: mail, contacts, calendar, messages, notes, drive, photos, safari,
-music, weather, maps.
+music, weather, maps, health, ops.
 Never claim a mutation succeeded unless request_local_approval / action_outcome reports success.
+Never claim Health works.
 """
 
 server = MCPServer(
@@ -110,7 +112,7 @@ def _tool(name: str, description: str, annotations: ToolAnnotations):
     "icloud_doctor",
     "One-shot diagnosis: credentials, domain readiness "
     "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos/Safari/Music/"
-    "Weather/Maps), and exact next steps. "
+    "Weather/Maps/Health), and exact next steps. "
     "Call first in a new chat.",
     READ_ANN,
 )
@@ -157,7 +159,16 @@ def icloud_list_domains() -> dict[str, Any]:
             {
                 "id": "mail",
                 "transport": "IMAP + SMTP + local SQLite cache",
-                "reads": ["stats", "sync", "list", "senders", "peek", "triage", "jobs"],
+                "reads": [
+                    "stats",
+                    "sync",
+                    "list",
+                    "senders",
+                    "peek",
+                    "triage",
+                    "jobs",
+                    "attachments",
+                ],
                 "mutations": [
                     "apply plan",
                     "cleanup strict",
@@ -165,6 +176,7 @@ def icloud_list_domains() -> dict[str, Any]:
                     "flags",
                     "move",
                     "trash",
+                    "create-folder",
                 ],
             },
             {
@@ -177,6 +189,7 @@ def icloud_list_domains() -> dict[str, Any]:
                 "id": "calendar",
                 "transport": "CalDAV",
                 "reads": ["calendars", "events", "reminders"],
+                "notes": "ATTENDEE + IANA timezone on event add/update.",
                 "mutations": [
                     "event-add",
                     "event-update",
@@ -197,40 +210,49 @@ def icloud_list_domains() -> dict[str, Any]:
             {
                 "id": "notes",
                 "transport": "AppleScript Notes.app",
-                "reads": ["list", "search", "read"],
+                "reads": ["list", "search", "read", "folders", "accounts"],
                 "mutations": ["create", "update", "delete"],
             },
             {
                 "id": "drive",
                 "transport": "CloudDocs filesystem",
                 "reads": ["ls", "tree", "find", "read"],
-                "mutations": ["put", "rm→Trash"],
+                "mutations": ["mkdir", "put", "rm→Trash"],
             },
             {
                 "id": "photos",
-                "transport": "Photos.sqlite",
+                "transport": "Photos.sqlite + AppleScript",
                 "reads": ["stats", "albums", "list"],
-                "mutations": ["export local originals"],
-                "requires": "Full Disk Access",
+                "mutations": ["export local originals", "favorite", "album-add"],
+                "requires": "Full Disk Access + Automation",
+                "notes": "Import/upload is not implemented.",
             },
             {
                 "id": "safari",
                 "transport": "AppleScript Safari",
-                "reads": ["tabs", "current"],
-                "mutations": ["open-url"],
+                "reads": ["tabs", "current", "page-text"],
+                "mutations": ["open-url", "search", "close-tab"],
                 "requires": "Automation",
             },
             {
                 "id": "music",
                 "transport": "AppleScript Music.app",
                 "reads": ["now-playing"],
-                "mutations": ["playpause", "next", "previous"],
+                "mutations": [
+                    "playpause",
+                    "next",
+                    "previous",
+                    "volume",
+                    "shuffle",
+                    "repeat",
+                    "play-by-name",
+                ],
                 "requires": "Automation",
             },
             {
                 "id": "weather",
                 "transport": "Open-Meteo HTTPS",
-                "reads": ["forecast"],
+                "reads": ["forecast", "hourly"],
                 "mutations": [],
                 "requires": "network",
             },
@@ -239,6 +261,20 @@ def icloud_list_domains() -> dict[str, Any]:
                 "transport": "maps.apple.com URL",
                 "reads": ["search"],
                 "mutations": ["open"],
+            },
+            {
+                "id": "health",
+                "transport": "signed HealthKit helper (absent)",
+                "reads": ["status"],
+                "mutations": [],
+                "notes": "Fail-closed. Does not scrape Health.app.",
+            },
+            {
+                "id": "ops",
+                "transport": "LaunchAgent template",
+                "reads": [],
+                "mutations": ["cleanup-agent write"],
+                "notes": "Writes a plist only. Does not launchctl load.",
             },
         ],
         "approval": "prepare_* → user OK → icloud_request_local_approval",
@@ -297,6 +333,38 @@ def icloud_mail_peek(
 ) -> dict[str, Any]:
     try:
         return services.mail_peek(uid=uid, folder=folder, max_body_chars=max_body_chars)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_mail_attachments",
+    "List MIME attachments on one cached/live message without writing files.",
+    READ_ANN,
+)
+def icloud_mail_attachments(uid: int, folder: str = "INBOX") -> dict[str, Any]:
+    try:
+        return {
+            "folder": folder,
+            "uid": uid,
+            "attachments": services.mail_list_attachments(folder=folder, uid=uid),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_mail_export_attachment",
+    "Export one MIME attachment into the exports jail. Dest must be a new file.",
+    WRITE_LOCAL_ANN,
+)
+def icloud_mail_export_attachment(
+    uid: int, dest: str, index: int = 0, folder: str = "INBOX"
+) -> dict[str, Any]:
+    try:
+        return services.mail_export_attachment(
+            folder=folder, uid=uid, index=index, dest=dest
+        )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -507,6 +575,32 @@ def icloud_notes_read(query: str) -> dict[str, Any]:
         return _err(exc)
 
 
+@_tool(
+    "icloud_notes_accounts",
+    "List Notes.app accounts (name and folder count). Does not mutate notes.",
+    READ_ANN,
+)
+def icloud_notes_accounts() -> dict[str, Any]:
+    try:
+        accounts = services.notes_accounts()
+        return {"count": len(accounts), "accounts": accounts}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_notes_folders",
+    "List Notes.app folders (name plus account). Does not mutate notes.",
+    READ_ANN,
+)
+def icloud_notes_folders() -> dict[str, Any]:
+    try:
+        folders = services.notes_folders()
+        return {"count": len(folders), "folders": folders}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # ---------------------------------------------------------------------------
 # Drive reads
 # ---------------------------------------------------------------------------
@@ -623,6 +717,25 @@ def icloud_safari_current_tab() -> dict[str, Any]:
         return _err(exc)
 
 
+@_tool(
+    "icloud_safari_page_text",
+    "Return a size-capped text snapshot of one open Safari tab. "
+    "Does not execute JavaScript and does not return raw HTML source.",
+    READ_ANN,
+)
+def icloud_safari_page_text(
+    window_index: int | None = None,
+    tab_index: int | None = None,
+) -> dict[str, Any]:
+    try:
+        return services.safari_page_text(
+            window_index=window_index,
+            tab_index=tab_index,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # ---------------------------------------------------------------------------
 # Music reads
 # ---------------------------------------------------------------------------
@@ -660,6 +773,7 @@ def icloud_weather_forecast(
     longitude: float | None = None,
     days: int = 3,
     temperature_unit: str = "celsius",
+    hourly: bool = False,
 ) -> dict[str, Any]:
     try:
         return services.weather_forecast(
@@ -668,6 +782,7 @@ def icloud_weather_forecast(
             longitude=longitude,
             days=days,
             temperature_unit=temperature_unit,
+            hourly=hourly,
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -684,9 +799,30 @@ def icloud_maps_search(
     query: str,
     latitude: float | None = None,
     longitude: float | None = None,
+    zoom: int | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     try:
-        return services.maps_search(query, latitude=latitude, longitude=longitude)
+        return services.maps_search(
+            query,
+            latitude=latitude,
+            longitude=longitude,
+            zoom=zoom,
+            map_type=map_type,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_health_status",
+    "Report HealthKit availability. Always fail-closed until a signed native "
+    "helper with HealthKit entitlements exists. Does not scrape Health.app.",
+    READ_ANN,
+)
+def icloud_health_status() -> dict[str, Any]:
+    try:
+        return services.health_read()
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -762,7 +898,8 @@ def icloud_prepare_mail_cleanup_strict(
 @_tool(
     "icloud_prepare_mail_send",
     "Prepare sending an iCloud Mail message via SMTP. From is always the Keychain account. "
-    "No attachments. Show exact recipients/subject/body before Touch ID.",
+    "Optional reply headers and size-capped local attachments. "
+    "Show exact recipients/subject/body before Touch ID.",
     PREPARE_ANN,
 )
 def icloud_prepare_mail_send(
@@ -771,17 +908,31 @@ def icloud_prepare_mail_send(
     body: str,
     cc: list[str] | str | None = None,
     bcc: list[str] | str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    attachments: list[str] | str | None = None,
 ) -> dict[str, Any]:
     try:
         frozen = services.prepare_mail_send(
-            to=to, subject=subject, body=body, cc=cc, bcc=bcc
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            in_reply_to=in_reply_to,
+            references=references,
+            attachments=attachments,
         )
         recipients = ", ".join(frozen["to"])
         cc_line = ", ".join(frozen["cc"]) or "(none)"
         bcc_line = ", ".join(frozen["bcc"]) or "(none)"
+        attach_line = ", ".join(item["name"] for item in frozen["attachments"]) or "(none)"
         preview = (
             f"Send iCloud Mail\nFrom: {frozen['from']}\nTo: {recipients}\n"
             f"Cc: {cc_line}\nBcc: {bcc_line}\nSubject: {frozen['subject']}\n"
+            f"In-Reply-To: {frozen['inReplyTo'] or '(none)'}\n"
+            f"References: {frozen['references'] or '(none)'}\n"
+            f"Attachments: {attach_line}\n"
             f"Body chars: {len(frozen['body'])}\nMessage-ID: {frozen['messageId']}\n"
             f"Plan SHA-256: {frozen['planSha256']}"
         )
@@ -818,18 +969,22 @@ def _mail_mutation_preview(title: str, plan: dict[str, Any]) -> tuple[str, str]:
 
 @_tool(
     "icloud_prepare_mail_flags",
-    "Prepare marking cached messages read or unread (IMAP \\Seen). "
-    "UIDs must already be in the folder cache. Show exact UIDs before Touch ID.",
+    "Prepare setting IMAP flags on cached messages. "
+    "Use seen=true/false for \\Seen, or flag=+Flagged/-Flagged/+Answered/-Answered. "
+    "Raw \\Flagged tokens are rejected. UIDs must already be in the folder cache.",
     PREPARE_ANN,
 )
 def icloud_prepare_mail_flags(
     uids: list[int] | str,
     folder: str = "INBOX",
-    seen: bool = True,
+    seen: bool | None = None,
+    flag: str | None = None,
 ) -> dict[str, Any]:
     try:
-        plan = services.prepare_mail_flags(folder=folder, uids=uids, seen=seen)
-        title = "Mark mail read" if seen else "Mark mail unread"
+        plan = services.prepare_mail_flags(
+            folder=folder, uids=uids, seen=seen, flag=flag
+        )
+        title = f"Set mail flag {plan['flag']}"
         preview, plan_hash = _mail_mutation_preview(title, plan)
         return approval.prepare_action(
             action="mail.flags",
@@ -887,6 +1042,25 @@ def icloud_prepare_mail_trash(
             target=f"mail:{folder}->Deleted Messages",
             preview=preview,
             payload={"plan": plan, "planSha256": plan_hash},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_mail_create_folder",
+    "Prepare creating an IMAP mailbox. Name is frozen before Touch ID.",
+    PREPARE_ANN,
+)
+def icloud_prepare_mail_create_folder(folder: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_mail_create_folder(folder)
+        preview = f"Create IMAP folder\nFolder: {frozen['folder']}"
+        return approval.prepare_action(
+            action="mail.create_folder",
+            target=f"mail:{frozen['folder']}",
+            preview=preview,
+            payload=frozen,
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1011,13 +1185,18 @@ def icloud_prepare_event_add(
     location: str | None = None,
     calendar: str | None = None,
     all_day: bool = False,
+    timezone: str | None = None,
+    attendees: list[str] | str | None = None,
 ) -> dict[str, Any]:
     try:
         collection = services.prepare_calendar_collection(calendar, events=True)
         uid = services.new_resource_uid()
+        attendee_line = attendees if isinstance(attendees, str) else ", ".join(attendees or [])
         preview = (
             f"Create event\nUID: {uid}\nTitle: {title}\nStart: {start}\nEnd: {end}\n"
-            f"Location: {location or ''}\nCalendar: {calendar or '(default)'}\nAll-day: {all_day}"
+            f"Location: {location or ''}\nCalendar: {calendar or '(default)'}\n"
+            f"All-day: {all_day}\nTimezone: {timezone or '(floating/UTC)'}\n"
+            f"Attendees: {attendee_line or '(none)'}"
         )
         return approval.prepare_action(
             action="calendar.event_add",
@@ -1030,6 +1209,8 @@ def icloud_prepare_event_add(
                 "location": location,
                 "calendar": calendar,
                 "allDay": all_day,
+                "timezone": timezone,
+                "attendees": attendees,
                 "collection": collection,
                 "uid": uid,
             },
@@ -1073,18 +1254,25 @@ def icloud_prepare_event_update(
     end: str | None = None,
     location: str | None = None,
     all_day: bool | None = None,
+    timezone: str | None = None,
+    attendees: list[str] | str | None = None,
     days: int = 365,
 ) -> dict[str, Any]:
     try:
-        if all(value is None for value in (title, start, end, location)):
+        if all(
+            value is None
+            for value in (title, start, end, location, timezone, attendees)
+        ):
             raise services.ServiceError("Provide at least one event field to update.")
         target = services.prepare_event_target(query, days=days)
+        attendee_line = attendees if isinstance(attendees, str) else ", ".join(attendees or [])
         preview = (
             f"Update calendar event\nTitle: {target['summary']}\nUID: {target['uid']}\n"
             f"Start: {target['start']}\nEnd: {target['end']}\n"
             f"Location: {target['location']}\nETag: {target['etag']}\n"
             f"New title={title}\nNew start={start}\nNew end={end}\n"
-            f"New location={location}\nAll-day: {all_day}"
+            f"New location={location}\nAll-day: {all_day}\n"
+            f"New timezone={timezone}\nNew attendees={attendee_line or '(unchanged)'}"
         )
         return approval.prepare_action(
             action="calendar.event_update",
@@ -1097,6 +1285,8 @@ def icloud_prepare_event_update(
                 "end": end,
                 "location": location,
                 "allDay": all_day,
+                "timezone": timezone,
+                "attendees": attendees,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -1201,35 +1391,44 @@ def icloud_prepare_reminder_update(
     PREPARE_ANN,
 )
 def icloud_prepare_messages_send(
-    to: str, text: str, service: str = "imessage"
+    to: str,
+    text: str,
+    service: str = "imessage",
+    attachment: str | None = None,
 ) -> dict[str, Any]:
     try:
-        if service not in {"imessage", "sms"}:
-            raise services.ServiceError("service must be imessage or sms")
-        if not text.strip():
-            raise services.ServiceError("text cannot be empty")
-        if len(text) > 10_000:
-            raise services.ServiceError("text exceeds 10,000 characters")
-        preview = f"Send via {service} to {to}\n\n{text}"
+        frozen = services.prepare_messages_send(
+            to=to, text=text, service=service, attachment=attachment
+        )
+        attach = frozen.get("attachment")
+        preview = (
+            f"Send via {frozen['service']} to {frozen['to']}\n"
+            f"Attachment: {attach['name'] if attach else '(none)'}\n\n{frozen['text']}"
+        )
         return approval.prepare_action(
             action="messages.send",
             target=f"messages:{to}",
             preview=preview,
-            payload={"to": to, "text": text, "service": service},
+            payload=frozen,
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
 
 @_tool("icloud_prepare_notes_create", "Prepare creating a Notes.app note.", PREPARE_ANN)
-def icloud_prepare_notes_create(title: str, body: str | None = None) -> dict[str, Any]:
+def icloud_prepare_notes_create(
+    title: str, body: str | None = None, folder: str | None = None
+) -> dict[str, Any]:
     try:
-        preview = f"Create note\nTitle: {title}\n\n{body or ''}"
+        preview = (
+            f"Create note\nTitle: {title}\nFolder: {folder or '(default iCloud)'}\n\n"
+            f"{body or ''}"
+        )
         return approval.prepare_action(
             action="notes.create",
             target=f"note:{title}",
             preview=preview,
-            payload={"title": title, "body": body or ""},
+            payload={"title": title, "body": body or "", "folder": folder},
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1284,6 +1483,26 @@ def icloud_prepare_notes_update(
             target=f"note:{target['id']}",
             preview=preview,
             payload={"target": target, "title": title, "body": body},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_drive_mkdir",
+    "Prepare creating a directory in iCloud Drive. Dest must not exist. "
+    "Refuses the Drive root.",
+    PREPARE_ANN,
+)
+def icloud_prepare_drive_mkdir(path: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_drive_mkdir(path)
+        preview = f"Create iCloud Drive directory\nPath: {frozen['relative']}"
+        return approval.prepare_action(
+            action="drive.mkdir",
+            target=f"drive:{frozen['relative']}",
+            preview=preview,
+            payload=frozen,
         )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -1379,6 +1598,52 @@ def icloud_prepare_photos_export(
 
 
 @_tool(
+    "icloud_prepare_photos_favorite",
+    "Prepare marking one Photos asset favorite/unfavorite by filename. "
+    "Does not import or upload photos.",
+    PREPARE_ANN,
+)
+def icloud_prepare_photos_favorite(filename: str, favorite: bool = True) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_photos_favorite(filename, favorite=favorite)
+        preview = (
+            f"Set Photos favorite\nFilename: {frozen['filename']}\n"
+            f"Favorite: {frozen['favorite']}"
+        )
+        return approval.prepare_action(
+            action="photos.favorite",
+            target=f"photos:{frozen['filename']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_photos_album_add",
+    "Prepare adding one Photos asset to an album by filename. "
+    "Does not create albums or import photos.",
+    PREPARE_ANN,
+)
+def icloud_prepare_photos_album_add(filename: str, album: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_photos_album_add(filename, album)
+        preview = (
+            f"Add Photos asset to album\nFilename: {frozen['filename']}\n"
+            f"Album: {frozen['album']}"
+        )
+        return approval.prepare_action(
+            action="photos.album_add",
+            target=f"photos:{frozen['filename']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
     "icloud_prepare_safari_open_url",
     "Prepare opening an http(s) URL in Safari (new tab or new window). "
     "Rejects javascript:/file:/data: and URLs without an explicit scheme.",
@@ -1395,6 +1660,56 @@ def icloud_prepare_safari_open_url(url: str, target: str = "new_tab") -> dict[st
         return approval.prepare_action(
             action="safari.open_url",
             target=f"safari:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_search",
+    "Prepare a web search opened as a frozen https URL in Safari. "
+    "Does not execute JavaScript.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_search(query: str, target: str = "new_tab") -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_search(query, target=target)
+        preview = (
+            f"Search the web in Safari\nQuery: {query}\n"
+            f"URL: {frozen['url']}\nTarget: {frozen['target']}"
+        )
+        return approval.prepare_action(
+            action="safari.open_url",
+            target=f"safari:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_close_tab",
+    "Prepare closing one Safari tab. Window/tab indices plus name/url are frozen.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_close_tab(
+    window_index: int, tab_index: int
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_close_tab(
+            window_index=window_index, tab_index=tab_index
+        )
+        preview = (
+            f"Close Safari tab\nWindow: {frozen['window_index']}\n"
+            f"Tab: {frozen['tab_index']}\nName: {frozen.get('name') or '(untitled)'}\n"
+            f"URL: {frozen.get('url') or '(none)'}"
+        )
+        return approval.prepare_action(
+            action="safari.close_tab",
+            target=f"safari:{frozen['window_index']}:{frozen['tab_index']}",
             preview=preview,
             payload=frozen,
         )
@@ -1459,10 +1774,87 @@ def icloud_prepare_music_previous() -> dict[str, Any]:
 
 
 @_tool(
+    "icloud_prepare_music_volume",
+    "Prepare setting Music.app sound volume (0-100).",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_volume(level: int) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_music_volume(level)
+        preview = f"Set Music volume\nLevel: {frozen['level']}"
+        return approval.prepare_action(
+            action="music.volume",
+            target=f"music:volume:{frozen['level']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_shuffle",
+    "Prepare setting Music.app shuffle (off, songs, albums, or groupings).",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_shuffle(mode: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_music_shuffle(mode)
+        preview = f"Set Music shuffle\nMode: {frozen['mode']}"
+        return approval.prepare_action(
+            action="music.shuffle",
+            target=f"music:shuffle:{frozen['mode']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_repeat",
+    "Prepare setting Music.app repeat (off, one, or all).",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_repeat(mode: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_music_repeat(mode)
+        preview = f"Set Music repeat\nMode: {frozen['mode']}"
+        return approval.prepare_action(
+            action="music.repeat",
+            target=f"music:repeat:{frozen['mode']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_play",
+    "Prepare playing a Music.app track by name. Search query is frozen as argv.",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_play(query: str) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_music_play(query)
+        preview = f"Play Music track by name\nQuery: {frozen['query']}"
+        return approval.prepare_action(
+            action="music.play",
+            target=f"music:play:{frozen['query']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
     "icloud_prepare_maps_open",
     "Prepare opening a frozen https://maps.apple.com URL in Maps.app. "
     "Provide either query (optional lat/lon pin) or daddr directions "
-    "(optional saddr / dirflg d|w|r). Rejects maps:/javascript:/file:/data:.",
+    "(optional saddr / dirflg d|w|r). Optional zoom (z) and map type (t). "
+    "Rejects maps:/javascript:/file:/data:.",
     PREPARE_ANN,
 )
 def icloud_prepare_maps_open(
@@ -1472,6 +1864,8 @@ def icloud_prepare_maps_open(
     saddr: str | None = None,
     daddr: str | None = None,
     dirflg: str | None = None,
+    zoom: int | None = None,
+    map_type: str | None = None,
 ) -> dict[str, Any]:
     try:
         frozen = services.prepare_maps_open(
@@ -1481,6 +1875,8 @@ def icloud_prepare_maps_open(
             saddr=saddr,
             daddr=daddr,
             dirflg=dirflg,
+            zoom=zoom,
+            map_type=map_type,
         )
         preview = (
             f"Open Maps\nMode: {frozen['mode']}\nURL: {frozen['url']}\n"
@@ -1489,6 +1885,32 @@ def icloud_prepare_maps_open(
         return approval.prepare_action(
             action="maps.open",
             target=f"maps:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_ops_cleanup_agent",
+    "Prepare writing a LaunchAgent plist template for scheduled mail cleanup. "
+    "Uses StartInterval seconds. Does not load or start the agent.",
+    PREPARE_ANN,
+)
+def icloud_prepare_ops_cleanup_agent(interval: int = 86400) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_ops_cleanup_agent(interval=interval)
+        preview = (
+            f"Write mail cleanup LaunchAgent\n"
+            f"Dest: {frozen['destination']}\n"
+            f"Interval: {frozen['interval']}s\n"
+            f"Label: {frozen['label']}\n"
+            "Does not launchctl load."
+        )
+        return approval.prepare_action(
+            action="ops.cleanup_agent",
+            target=f"ops:{frozen['destination']}",
             preview=preview,
             payload=frozen,
         )

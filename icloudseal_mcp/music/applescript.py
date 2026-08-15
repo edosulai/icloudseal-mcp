@@ -1,7 +1,7 @@
 """Music.app access via AppleScript.
 
 Reads never launch Music. Playback commands are constant scripts with no
-user interpolation. Search / play-by-name is intentionally not exposed.
+user interpolation. Search / play-by-name is a separate argv-only helper.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ from typing import Any
 FIELD = "\x1f"
 
 ALLOWED_PLAYBACK = frozenset({"playpause", "next", "previous"})
+ALLOWED_SHUFFLE = frozenset({"off", "songs", "albums", "groupings"})
+ALLOWED_REPEAT = frozenset({"off", "one", "all"})
+MAX_SEARCH_LEN = 200
 
 PLAYBACK_SCRIPTS = {
     "playpause": 'tell application "Music" to playpause',
@@ -138,3 +141,71 @@ def playback(action: str) -> None:
     if action not in ALLOWED_PLAYBACK:
         raise MusicError("playback action must be playpause, next, or previous.")
     _run(PLAYBACK_SCRIPTS[action])
+
+
+def set_volume(level: object) -> None:
+    if isinstance(level, bool) or not isinstance(level, int) or level < 0 or level > 100:
+        raise MusicError("volume must be an integer 0-100.")
+    script = """on run argv
+    set theLevel to item 1 of argv as integer
+    tell application "Music" to set sound volume to theLevel
+end run"""
+    _run(script, str(level))
+
+
+def set_shuffle(mode: str) -> None:
+    flag = (mode or "").strip().lower()
+    if flag not in ALLOWED_SHUFFLE:
+        raise MusicError("shuffle must be off, songs, albums, or groupings.")
+    script = """on run argv
+    set theMode to item 1 of argv
+    tell application "Music"
+        if theMode is "off" then
+            set shuffle enabled to false
+        else
+            set shuffle enabled to true
+            set shuffle mode to songs
+            if theMode is "albums" then set shuffle mode to albums
+            if theMode is "groupings" then set shuffle mode to groupings
+        end if
+    end tell
+end run"""
+    _run(script, flag)
+
+
+def set_repeat(mode: str) -> None:
+    flag = (mode or "").strip().lower()
+    if flag not in ALLOWED_REPEAT:
+        raise MusicError("repeat must be off, one, or all.")
+    script = """on run argv
+    set theMode to item 1 of argv
+    tell application "Music"
+        if theMode is "off" then
+            set song repeat to off
+        else if theMode is "one" then
+            set song repeat to one
+        else
+            set song repeat to all
+        end if
+    end tell
+end run"""
+    _run(script, flag)
+
+
+def play_by_name(query: str) -> None:
+    candidate = (query or "").strip()
+    if not candidate:
+        raise MusicError("Search query is required.")
+    if any(ch in candidate for ch in "\r\n\x00"):
+        raise MusicError("Search query must not contain control characters.")
+    if len(candidate) > MAX_SEARCH_LEN:
+        raise MusicError(f"Search query is limited to {MAX_SEARCH_LEN} characters.")
+    script = """on run argv
+    set theQuery to item 1 of argv
+    tell application "Music"
+        set theResults to search playlist 1 for theQuery
+        if (count of theResults) is 0 then error "No matching track"
+        play item 1 of theResults
+    end tell
+end run"""
+    _run(script, candidate)

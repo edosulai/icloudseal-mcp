@@ -8,21 +8,23 @@ hands (fetch, list, create, move, delete). Mutations require Touch ID / macOS
 password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
-> **Status — eleven domains live (CLI + MCP)**
-> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, send, flags, move, and trash.
+> **Status — thirteen domains live (CLI + MCP)**
+> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), flags, move, trash, and create-folder.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
-> - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/update/rm/done.
-> - **Messages / SMS** — read `chat.db` (chats/list/search/export) plus gated AppleScript send.
-> - **Notes (AppleScript)** — list/search/read plus gated create/update/delete.
-> - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
-> - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
-> - **Safari (AppleScript)** — list tabs / current tab plus gated http(s) open.
-> - **Music (AppleScript)** — now-playing plus gated playpause / next / previous.
-> - **Weather (Open-Meteo)** — current plus a short daily forecast (place or lat/lon).
-> - **Maps (maps.apple.com)** — local search URL plus gated open in Maps.app.
+> - **Calendar + Reminders (CalDAV)** — list plus gated add/update/rm/done with ATTENDEE/TZID.
+> - **Messages / SMS** — read `chat.db` plus gated AppleScript send (optional file attach).
+> - **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create/update/delete.
+> - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated mkdir/put/rm (rm → Trash).
+> - **Photos** — stats/albums/list plus gated export, favorite, and album-add. Import is not implemented.
+> - **Safari (AppleScript)** — tabs/current/page-text plus gated http(s) open, search, and close-tab.
+> - **Music (AppleScript)** — now-playing plus gated playpause/next/previous, volume, shuffle, repeat, play-by-name.
+> - **Weather (Open-Meteo)** — current plus daily forecast; hourly is opt-in.
+> - **Maps (maps.apple.com)** — local search/directions URL plus gated open (optional zoom/type).
+> - **Health** — status only. Fail-closed until a signed HealthKit helper exists. Does not scrape Health.app.
+> - **Ops** — write a mail-cleanup LaunchAgent plist. Does not `launchctl load`.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~66 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~83 tools).
 
 ## Seal family & security model
 
@@ -82,17 +84,19 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Group | Tools |
 |---|---|
 | Onboarding | `icloud_doctor`, `icloud_status`, `icloud_security_audit`, `icloud_list_domains` |
-| Mail | stats/sync/list/senders/peek/triage/jobs + prepare apply/cleanup/send/flags/move/trash |
+| Mail | stats/sync/list/senders/peek/triage/jobs/attachments + prepare apply/cleanup/send/flags/move/trash/create-folder |
 | Contacts | list/search/export + prepare create/update/delete |
 | Calendar | list/events/reminders + prepare event add/update/rm and reminder mutations |
-| Messages | chats/list/search/export + prepare send |
-| Notes | list/search/read + prepare create/update/delete |
-| Drive | ls/tree/find/read + prepare put/rm |
-| Photos | stats/albums/list + prepare export |
-| Safari | tabs/current + prepare open-url |
-| Music | now-playing + prepare playpause/next/previous |
-| Weather | forecast (Open-Meteo; no Weather.app) |
-| Maps | search URL + prepare open |
+| Messages | chats/list/search/export + prepare send (optional attach) |
+| Notes | list/search/read/accounts/folders + prepare create/update/delete |
+| Drive | ls/tree/find/read + prepare mkdir/put/rm |
+| Photos | stats/albums/list + prepare export/favorite/album-add |
+| Safari | tabs/current/page-text + prepare open-url/search/close-tab |
+| Music | now-playing + prepare playpause/next/previous/volume/shuffle/repeat/play |
+| Weather | forecast (Open-Meteo current+daily; hourly opt-in) |
+| Maps | search URL + prepare open (optional zoom/type) |
+| Health | status only (fail-closed) |
+| Ops | prepare cleanup-agent (write plist only) |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
 ## Architecture
@@ -114,6 +118,7 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
         │   calendar/ CalDAV  messages/ chat.db    │
         │   notes/ AppleScript  drive/ fs  photos/ │
         │   safari/ music/ weather/ maps/          │
+        │   health/ ops/                           │
         │   native-approval.swift (Touch ID gate)  │
                    └──────────────────────────────────────────┘
                              IMAP/SMTP/DAV · local DB · AppleScript · Open-Meteo
@@ -169,11 +174,15 @@ The live file is gitignored and must not be committed.
 | `apply p.json [--apply]` | Backup `.eml`, then move/delete via IMAP |
 | `cleanup strict [--apply]` | Full-sync INBOX, plan/delete known bulk senders |
 | `jobs collect --since 7d --out p.json` | Extract & score job leads (review-only) |
-| `send --to --subject --body [--cc --bcc] [--apply]` | Send via iCloud SMTP (From = Keychain email) |
+| `send --to --subject --body [--cc --bcc --in-reply-to --references --attach] [--apply]` | Send via iCloud SMTP (From = Keychain email) |
 | `mark-read --uids 1,2 [--folder INBOX] [--apply]` | Mark cached messages read (`\\Seen`) |
 | `mark-unread --uids 1,2 [--folder INBOX] [--apply]` | Mark cached messages unread |
+| `flags --uids 1,2 --flag +Flagged\|-Flagged\|+Answered\|-Answered [--folder INBOX] [--apply]` | Add or remove extra IMAP flags |
 | `move --uids 1,2 --to Archive [--folder INBOX] [--apply]` | Move cached messages to another folder |
 | `trash --uids 1,2 [--folder INBOX] [--apply]` | Move cached messages to Deleted Messages |
+| `create-folder --name Archive/2026 [--apply]` | Create an IMAP folder |
+| `attachments <uid> [--folder INBOX]` | List inbound attachments |
+| `export-attachment <uid> --name <file> --dest <exports/…> [--folder INBOX] [--apply]` | Export one attachment into the exports jail |
 
 ## Contacts commands (`icloudseal-mcp contacts …`)
 
@@ -196,8 +205,8 @@ Write commands print a dry-run preview and do nothing until `--apply` is added.
 | `calendars [--json]` | List calendars and reminder lists |
 | `events [--days 30] [--json]` | Upcoming events |
 | `reminders [--all] [--json]` | Reminders (open by default) |
-| `event-add --title --start [--end --location --calendar --all-day] [--apply]` | Create event |
-| `event-update <query> [--title --start --end --location --all-day] [--apply]` | Patch event (RRULE/VALARM kept; `.ics` backed up) |
+| `event-add --title --start [--end --location --calendar --all-day --timezone --attendees] [--apply]` | Create event |
+| `event-update <query> [--title --start --end --location --all-day --timezone --attendees] [--apply]` | Patch event (RRULE/VALARM kept; `.ics` backed up) |
 | `event-rm <query> [--apply]` | Delete event (`.ics` backed up) |
 | `reminder-add --title [--due --list] [--apply]` | Create reminder |
 | `reminder-update <query> [--title --due] [--apply]` | Patch reminder (RRULE/VALARM kept; empty `--due` clears it) |
@@ -216,7 +225,7 @@ Reads need **Full Disk Access** on the running terminal/app.
 | `list <chat> [--limit 40]` | Messages in a conversation (id or name fragment) |
 | `search <query> [--limit]` | Search message text |
 | `export <chat> <file.json>` | Export a conversation |
-| `send --to <handle> --text "…" [--service imessage\|sms] [--apply]` | Send via Messages.app |
+| `send --to <handle> --text "…" [--service imessage\|sms --file <path>] [--apply]` | Send via Messages.app |
 
 Sending is driven through Messages.app via AppleScript; SMS only works with iPhone Text Message Forwarding enabled.
 
@@ -225,7 +234,8 @@ Sending is driven through Messages.app via AppleScript; SMS only works with iPho
 | Command | Action |
 |---|---|
 | `list [--limit] [--json]` / `search <q>` / `read <q>` | Browse notes |
-| `create --title … [--body …] [--apply]` | Create a note |
+| `accounts [--json]` / `folders [--json]` | List Notes accounts and folders |
+| `create --title … [--body … --folder …] [--apply]` | Create a note (still iCloud-only) |
 | `update <q> [--title --body] [--apply]` | Update a note (body backed up first) |
 | `delete <q> [--apply]` | Delete a note (body backed up to `backups/`) |
 
@@ -237,6 +247,7 @@ Paths are relative to the iCloud Drive root.
 |---|---|
 | `ls [path]` / `tree [path] [--depth]` / `find <glob> [path]` | Browse |
 | `read <path>` | Print a text file (truncated at 200 KB) |
+| `mkdir <path> [--apply]` | Create a folder (refuses Drive root; dest must not exist) |
 | `put <local> <dest> [--apply]` | Copy a local file into iCloud Drive |
 | `rm <path> [--apply]` | Move an item to the macOS Trash (never permanent) |
 
@@ -252,6 +263,8 @@ downloaded and reports the rest.
 | `albums [--json]` | Albums with item counts |
 | `list [--album … --kind photo\|video --favorites --limit] [--json]` | List assets (newest first) |
 | `export <dir> [--album --kind --favorites] [--apply]` | Copy locally-downloaded originals out |
+| `favorite --filename <name> [--unfavorite] [--apply]` | Favorite or unfavorite by filename |
+| `album-add --filename <name> --album <name> [--apply]` | Add an existing photo to an album. Import is not implemented. |
 
 ## Safari commands (`icloudseal-mcp safari …`)
 
@@ -262,13 +275,16 @@ Only `http` / `https` URLs are accepted — no implicit `https://` prefix, no
 | Command | Action |
 |---|---|
 | `tabs [--json]` | List open tabs (empty if Safari is not running) |
-| `current [--json]` | Show the current tab (name + URL; no page source) |
+| `current [--json]` | Show the current tab (name + URL) |
+| `source [--window --tab] [--json]` | Size-capped page text of the selected tab |
+| `search --query <text> [--window] [--apply]` | Open a Google search URL in Safari |
 | `open --url <http(s)> [--window] [--apply]` | Open the frozen URL in a new tab or window |
+| `close --window N --tab N [--apply]` | Close a frozen tab after snapshotting name + URL |
 
 ## Music commands (`icloudseal-mcp music …`)
 
 Reads do **not** launch Music.app. Playback is dry-run unless `--apply`.
-Search / play-by-name is not exposed.
+AirPlay is not exposed.
 
 | Command | Action |
 |---|---|
@@ -276,6 +292,10 @@ Search / play-by-name is not exposed.
 | `playpause [--apply]` | Toggle play/pause |
 | `next [--apply]` | Skip to the next track |
 | `previous [--apply]` | Skip to the previous track |
+| `volume --level 0-100 [--apply]` | Set Music volume |
+| `shuffle --mode off\|songs\|albums\|groupings [--apply]` | Set shuffle mode |
+| `repeat --mode off\|one\|all [--apply]` | Set repeat mode |
+| `play --query <name> [--apply]` | Search the library and play the first match |
 
 ## Weather commands (`icloudseal-mcp weather …`)
 
@@ -285,8 +305,8 @@ Results include the required Open-Meteo attribution.
 
 | Command | Action |
 |---|---|
-| `forecast --place <name> [--days 1-7] [--unit celsius\|fahrenheit] [--json]` | Geocode then forecast |
-| `forecast --lat <lat> --lon <lon> [--days] [--unit] [--json]` | Forecast for coordinates |
+| `forecast --place <name> [--days 1-7] [--unit celsius\|fahrenheit --hourly] [--json]` | Geocode then forecast |
+| `forecast --lat <lat> --lon <lon> [--days] [--unit --hourly] [--json]` | Forecast for coordinates |
 
 ## Maps commands (`icloudseal-mcp maps …`)
 
@@ -296,9 +316,9 @@ Search builds a documented `https://maps.apple.com/?…` URL locally and does
 
 | Command | Action |
 |---|---|
-| `search --query <text> [--lat --lon] [--json]` | Build a search URL (optional `ll` pin) |
-| `open --query <text> [--lat --lon] [--apply]` | Open the frozen search URL in Maps.app |
-| `open --daddr <dest> [--saddr] [--dirflg d\|w\|r] [--apply]` | Open frozen directions |
+| `search --query <text> [--lat --lon --zoom --type] [--json]` | Build a search URL (optional `ll` pin, `z`, `t`) |
+| `open --query <text> [--lat --lon --zoom --type] [--apply]` | Open the frozen search URL in Maps.app |
+| `open --daddr <dest> [--saddr] [--dirflg d\|w\|r --zoom --type] [--apply]` | Open frozen directions |
 
 ## Safety model
 
@@ -325,9 +345,10 @@ Search builds a documented `https://maps.apple.com/?…` URL locally and does
 - **No AppleScript interpolation.** Notes, Messages, Finder, and Safari receive
   dynamic values through AppleScript `argv`, never executable script source.
   Music playback scripts are constant (no user values at all).
-- **Safari URL allowlist.** Open-URL freezes the exact `http`/`https` string
-  shown in preview. Missing schemes and `javascript:` / `file:` / `data:` fail
-  closed. Page source, `do JavaScript`, and Search the Web are not exposed.
+- **Safari URL allowlist.** Open-URL and search freeze the exact `http`/`https`
+  string shown in preview. Missing schemes and `javascript:` / `file:` / `data:`
+  fail closed. Page text is size-capped and read-only. `do JavaScript` is not
+  exposed.
 - **Weather hosts are pinned.** Forecast/geocode only call
   `api.open-meteo.com` and `geocoding-api.open-meteo.com` over HTTPS. User
   input is a place name or coordinates, never a URL. Redirects are refused.
@@ -370,21 +391,39 @@ Three tiers, by how macOS exposes each service:
 | Messages / SMS | local `~/Library/Messages/chat.db` (read) + AppleScript (send) | **Full Disk Access** + Automation |
 | Notes | AppleScript (Notes.app) | Automation |
 | iCloud Drive | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — |
-| Photos | local `Photos.sqlite` catalog (read) | **Full Disk Access** |
+| Photos | local `Photos.sqlite` catalog (read) + AppleScript (favorite/album) | **Full Disk Access** + Automation |
 | Safari | AppleScript (Safari) | Automation |
 | Music | AppleScript (Music.app) | Automation |
 | Weather | Open-Meteo HTTPS | network |
 | Maps | `https://maps.apple.com` URL | `/usr/bin/open` (gated) |
+| Health | signed helper stub | fail-closed until entitled |
+| Ops | LaunchAgent plist write | local filesystem |
+
+## Health commands (`icloudseal-mcp health …`)
+
+Status only. This is not a working HealthKit reader.
+
+| Command | Action |
+|---|---|
+| `status [--json]` | Report that Health is unavailable until a signed helper exists |
+
+## Ops commands (`icloudseal-mcp ops …`)
+
+Writes a LaunchAgent plist. Does **not** `launchctl load`.
+
+| Command | Action |
+|---|---|
+| `cleanup-agent [--interval 86400] [--apply]` | Write `dev.icloudseal.mail-cleanup.plist` under App Support |
 
 ## Roadmap
 
-- **Photos write** — current Photos support is read + best-effort export only.
-  Album edits / imports would need PhotoKit (`osxphotos`) or Photos.app
-  automation; deferred because automation blocks on TCC and originals are
-  iCloud-offloaded.
-- **Health** — blocked without a signed native helper + HealthKit entitlements.
-  Will not scrape Health.app.
-- **Scheduled cleanup** — optional LaunchAgent for recurring `mail cleanup strict`.
+- **Photos import** — favorite / album-add ship via filename AppleScript.
+  Upload/import still needs PhotoKit or Photos.app and stays unimplemented.
+- **Health reads** — helper + MCP status ship fail-closed. A working read
+  needs a *separate* signed native helper with HealthKit entitlements. Will
+  not scrape Health.app.
+- **Scheduled cleanup load** — plist generation ships; loading/enabling the
+  LaunchAgent stays a manual `launchctl` step.
 
 ## Why not a unified iCloud API?
 

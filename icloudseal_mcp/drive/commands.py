@@ -2,8 +2,8 @@
 
 iCloud Drive is mounted at
 ``~/Library/Mobile Documents/com~apple~CloudDocs``. Reads are plain filesystem
-ops. Writes (``put``/``rm``) are gated behind ``--apply``; ``rm`` moves items to
-the macOS Trash (never a permanent delete).
+ops. Writes (``put``/``mkdir``/``rm``) are gated behind ``--apply``; ``rm``
+moves items to the macOS Trash (never a permanent delete).
 """
 
 from __future__ import annotations
@@ -109,6 +109,21 @@ def cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mkdir(args: argparse.Namespace) -> int:
+    dest = _resolve(args.path)
+    if dest == DRIVE_ROOT.resolve():
+        raise SystemExit("Refusing to mkdir the iCloud Drive root.")
+    if dest.exists():
+        raise SystemExit(f"Already exists: {_rel(dest)}")
+    console.print(f"Would create directory [bold]{_rel(dest)}[/bold]")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to create the directory.")
+        return 0
+    dest.mkdir(parents=True, exist_ok=False)
+    console.print(f"[green]Created[/green] {_rel(dest)}")
+    return 0
+
+
 def cmd_put(args: argparse.Namespace) -> int:
     src = Path(args.local).expanduser().resolve()
     if not src.is_file():
@@ -170,6 +185,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("read", help="Print a text file.")
     sp.add_argument("path")
     sp.set_defaults(func=cmd_read)
+
+    sp = sub.add_parser("mkdir", help="Create a directory in iCloud Drive. Requires --apply.")
+    sp.add_argument("path", help="Directory path relative to iCloud Drive root")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_mkdir)
 
     sp = sub.add_parser("put", help="Copy a local file into iCloud Drive. Requires --apply.")
     sp.add_argument("local")

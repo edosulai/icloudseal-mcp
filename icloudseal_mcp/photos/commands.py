@@ -14,7 +14,8 @@ from pathlib import Path
 from rich.table import Table
 
 from ..common import console
-from . import photosdb
+from . import applescript, photosdb
+from .applescript import PhotosScriptError
 from .photosdb import PhotosAccessError
 
 
@@ -108,6 +109,38 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_favorite(args: argparse.Namespace) -> int:
+    console.rule("Photos favorite" if args.apply else "Photos favorite (dry-run)")
+    console.print(f"Filename: {args.filename}")
+    console.print(f"Favorite: {not args.unfavorite}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to change favorite.")
+        return 0
+    try:
+        applescript.set_favorite(args.filename, favorite=not args.unfavorite)
+    except PhotosScriptError as exc:
+        console.print(f"[red]Photos error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Updated favorite[/green] {args.filename}")
+    return 0
+
+
+def cmd_album_add(args: argparse.Namespace) -> int:
+    console.rule("Photos album-add" if args.apply else "Photos album-add (dry-run)")
+    console.print(f"Filename: {args.filename}")
+    console.print(f"Album: {args.album}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to add the item to the album.")
+        return 0
+    try:
+        applescript.add_to_album(args.filename, args.album)
+    except PhotosScriptError as exc:
+        console.print(f"[red]Photos error:[/red] {exc}")
+        return 2
+    console.print(f"[green]Added[/green] {args.filename} to {args.album}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("stats", help="Library totals (photos/videos/favorites/albums).")
     sp.add_argument("--json", action="store_true")
@@ -133,6 +166,24 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--limit", type=int, default=200)
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_export)
+
+    sp = sub.add_parser(
+        "favorite",
+        help="Mark a Photos item favorite/unfavorite by filename. Requires --apply.",
+    )
+    sp.add_argument("--filename", required=True)
+    sp.add_argument("--unfavorite", action="store_true", help="Clear favorite instead of setting it.")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_favorite)
+
+    sp = sub.add_parser(
+        "album-add",
+        help="Add a Photos item to an existing album by filename. Requires --apply.",
+    )
+    sp.add_argument("--filename", required=True)
+    sp.add_argument("--album", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_album_add)
 
 
 __all__ = ["register"]

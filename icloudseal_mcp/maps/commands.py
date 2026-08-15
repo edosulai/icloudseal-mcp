@@ -21,6 +21,8 @@ def cmd_search(args: argparse.Namespace) -> int:
             args.query,
             latitude=args.lat,
             longitude=args.lon,
+            zoom=args.zoom,
+            map_type=args.type,
         )
     except MapsError as exc:
         console.print(f"[red]Maps error:[/red] {exc}")
@@ -44,6 +46,8 @@ def cmd_open(args: argparse.Namespace) -> int:
                 args.query,
                 latitude=args.lat,
                 longitude=args.lon,
+                zoom=args.zoom,
+                map_type=args.type,
             )
         else:
             if args.lat is not None or args.lon is not None:
@@ -53,6 +57,8 @@ def cmd_open(args: argparse.Namespace) -> int:
                 daddr=args.daddr,
                 saddr=args.saddr,
                 dirflg=args.dirflg,
+                zoom=args.zoom,
+                map_type=args.type,
             )
     except MapsError as exc:
         console.print(f"[red]Maps error:[/red] {exc}")
@@ -79,6 +85,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--query", required=True)
     sp.add_argument("--lat", type=float)
     sp.add_argument("--lon", type=float)
+    sp.add_argument("--zoom", type=int)
+    sp.add_argument("--type", choices=sorted(urls.ALLOWED_MAP_TYPES))
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_search)
 
@@ -92,6 +100,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--saddr", help="Directions start address.")
     sp.add_argument("--daddr", help="Directions destination.")
     sp.add_argument("--dirflg", choices=sorted(urls.ALLOWED_DIRFLG))
+    sp.add_argument("--zoom", type=int)
+    sp.add_argument("--type", choices=sorted(urls.ALLOWED_MAP_TYPES))
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_open)
 

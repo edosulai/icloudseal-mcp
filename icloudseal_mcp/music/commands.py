@@ -80,6 +80,54 @@ def cmd_previous(args: argparse.Namespace) -> int:
     return _cmd_playback(args, "previous")
 
 
+def cmd_volume(args: argparse.Namespace) -> int:
+    console.rule("Music volume" if args.apply else "Music volume (dry-run)")
+    console.print(f"Level: {args.level}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to set the volume.")
+        return 0
+    if _guard(lambda: applescript.set_volume(args.level)) is None:
+        return 2
+    console.print(f"[green]Volume[/green] {args.level}")
+    return 0
+
+
+def cmd_shuffle(args: argparse.Namespace) -> int:
+    console.rule("Music shuffle" if args.apply else "Music shuffle (dry-run)")
+    console.print(f"Mode: {args.mode}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to set shuffle.")
+        return 0
+    if _guard(lambda: applescript.set_shuffle(args.mode)) is None:
+        return 2
+    console.print(f"[green]Shuffle[/green] {args.mode}")
+    return 0
+
+
+def cmd_repeat(args: argparse.Namespace) -> int:
+    console.rule("Music repeat" if args.apply else "Music repeat (dry-run)")
+    console.print(f"Mode: {args.mode}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to set repeat.")
+        return 0
+    if _guard(lambda: applescript.set_repeat(args.mode)) is None:
+        return 2
+    console.print(f"[green]Repeat[/green] {args.mode}")
+    return 0
+
+
+def cmd_play(args: argparse.Namespace) -> int:
+    console.rule("Music play" if args.apply else "Music play (dry-run)")
+    console.print(f"Query: {args.query}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to play the first match.")
+        return 0
+    if _guard(lambda: applescript.play_by_name(args.query)) is None:
+        return 2
+    console.print(f"[green]Playing[/green] {args.query}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("now", help="Show now-playing (does not launch Music).")
     sp.add_argument("--json", action="store_true")
@@ -96,6 +144,26 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("previous", help="Skip to the previous track. Requires --apply.")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_previous)
+
+    sp = sub.add_parser("volume", help="Set Music.app volume 0-100. Requires --apply.")
+    sp.add_argument("--level", type=int, required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_volume)
+
+    sp = sub.add_parser("shuffle", help="Set Music.app shuffle mode. Requires --apply.")
+    sp.add_argument("--mode", required=True, choices=sorted(applescript.ALLOWED_SHUFFLE))
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_shuffle)
+
+    sp = sub.add_parser("repeat", help="Set Music.app repeat mode. Requires --apply.")
+    sp.add_argument("--mode", required=True, choices=sorted(applescript.ALLOWED_REPEAT))
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_repeat)
+
+    sp = sub.add_parser("play", help="Play the first Music.app track matching a query. Requires --apply.")
+    sp.add_argument("--query", required=True)
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_play)
 
 
 __all__ = ["register"]

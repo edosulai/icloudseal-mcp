@@ -28,6 +28,7 @@ ATTRIBUTION = "Weather data by Open-Meteo.com"
 
 CURRENT_FIELDS = "temperature_2m,weather_code,wind_speed_10m,precipitation"
 DAILY_FIELDS = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum"
+HOURLY_FIELDS = "temperature_2m,weather_code,precipitation,wind_speed_10m"
 
 WMO_TEXT = {
     0: "Clear",
@@ -229,6 +230,36 @@ def _daily_rows(daily: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _hourly_rows(hourly: dict[str, Any]) -> list[dict[str, Any]]:
+    times = hourly.get("time") or []
+    if not isinstance(times, list):
+        return []
+    codes = hourly.get("weather_code") or []
+    temps = hourly.get("temperature_2m") or []
+    precip = hourly.get("precipitation") or []
+    wind = hourly.get("wind_speed_10m") or []
+    rows: list[dict[str, Any]] = []
+    for index, stamp in enumerate(times):
+        code = _optional_int(codes[index]) if index < len(codes) else None
+        rows.append(
+            {
+                "time": stamp,
+                "weather_code": code,
+                "condition": wmo_text(code),
+                "temperature": (
+                    _optional_number(temps[index]) if index < len(temps) else None
+                ),
+                "precipitation": (
+                    _optional_number(precip[index]) if index < len(precip) else None
+                ),
+                "wind_speed": (
+                    _optional_number(wind[index]) if index < len(wind) else None
+                ),
+            }
+        )
+    return rows
+
+
 def forecast(
     *,
     place: str | None = None,
@@ -236,9 +267,10 @@ def forecast(
     longitude: object | None = None,
     days: object = DEFAULT_DAYS,
     temperature_unit: str = "celsius",
+    hourly: bool = False,
     opener: UrlOpen | None = None,
 ) -> dict[str, Any]:
-    """Current conditions plus a short daily forecast."""
+    """Current conditions plus a short daily forecast. Hourly is opt-in."""
     has_place = bool((place or "").strip())
     has_any_coord = latitude is not None or longitude is not None
     if has_place == has_any_coord:
@@ -255,17 +287,18 @@ def forecast(
     else:
         lat, lon = validate_coords(latitude, longitude)
 
-    query = urllib.parse.urlencode(
-        {
-            "latitude": lat,
-            "longitude": lon,
-            "current": CURRENT_FIELDS,
-            "daily": DAILY_FIELDS,
-            "forecast_days": forecast_days,
-            "timezone": "auto",
-            "temperature_unit": unit,
-        }
-    )
+    params: dict[str, Any] = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": CURRENT_FIELDS,
+        "daily": DAILY_FIELDS,
+        "forecast_days": forecast_days,
+        "timezone": "auto",
+        "temperature_unit": unit,
+    }
+    if hourly:
+        params["hourly"] = HOURLY_FIELDS
+    query = urllib.parse.urlencode(params)
     url = f"https://{FORECAST_HOST}/v1/forecast?{query}"
     data = _request(url, opener=opener or urlopen)
     current = data.get("current") if isinstance(data.get("current"), dict) else {}
@@ -285,7 +318,7 @@ def forecast(
     }
     if resolved is None and data.get("timezone"):
         place_out = {**place_out, "timezone": data.get("timezone")}
-    return {
+    payload: dict[str, Any] = {
         "place": place_out,
         "current": {
             "time": current.get("time"),
@@ -306,3 +339,7 @@ def forecast(
         "timezone": data.get("timezone") or place_out.get("timezone"),
         "attribution": ATTRIBUTION,
     }
+    if hourly:
+        hourly_data = data.get("hourly") if isinstance(data.get("hourly"), dict) else {}
+        payload["hourly"] = _hourly_rows(hourly_data)
+    return payload

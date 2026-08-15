@@ -103,6 +103,7 @@ def cmd_event_add(args: argparse.Namespace) -> int:
     ics = caldav.build_event(
         uid=uid, summary=args.title, start=args.start, end=args.end,
         location=args.location or "", all_day=args.all_day,
+        timezone=args.timezone, attendees=args.attendees,
     )
     console.rule("New event (dry-run)")
     console.print(ics)
@@ -130,8 +131,20 @@ def cmd_event_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_event_update(args: argparse.Namespace) -> int:
-    if all(value is None for value in (args.title, args.start, args.end, args.location)):
-        raise SystemExit("Provide at least one of --title, --start, --end, --location.")
+    if all(
+        value is None
+        for value in (
+            args.title,
+            args.start,
+            args.end,
+            args.location,
+            args.attendees,
+            args.timezone,
+        )
+    ):
+        raise SystemExit(
+            "Provide at least one of --title, --start, --end, --location, --attendees, --timezone."
+        )
     session = CalendarSession.connect()
     target = _resolve_one(session.list_events(days=args.days), args.query)
     try:
@@ -142,6 +155,8 @@ def cmd_event_update(args: argparse.Namespace) -> int:
             end=args.end,
             location=args.location,
             all_day=args.all_day or None,
+            timezone=args.timezone,
+            attendees=args.attendees,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -250,6 +265,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--start", required=True, help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
     sp.add_argument("--end", help="Same format as --start")
     sp.add_argument("--location")
+    sp.add_argument("--timezone", help="IANA timezone for timed events, e.g. America/Los_Angeles")
+    sp.add_argument("--attendees", help="Comma-separated attendee emails")
     sp.add_argument("--calendar", help="Target calendar name (default: first)")
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--apply", action="store_true")
@@ -270,6 +287,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--start", help="'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
     sp.add_argument("--end", help="Same format as --start")
     sp.add_argument("--location")
+    sp.add_argument("--timezone", help="IANA timezone for timed events")
+    sp.add_argument("--attendees", help="Comma-separated attendee emails")
     sp.add_argument("--all-day", action="store_true")
     sp.add_argument("--days", type=int, default=365, help="Search window")
     sp.add_argument("--apply", action="store_true")

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 FIELD = "\x1f"
 RECORD = "\x1e"
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 ALLOWED_TARGETS = frozenset({"new_tab", "new_window"})
+MAX_SEARCH_LEN = 200
+MAX_PAGE_CHARS = 8_000
 
 
 class SafariError(RuntimeError):
@@ -145,3 +147,79 @@ def open_url(url: str, *, target: str = "new_tab") -> None:
     end tell
 end run"""
     _run(script, canonical, kind)
+
+
+def search_url(query: str) -> str:
+    """Build an https Google search URL. Never prepends a scheme to bare words."""
+    candidate = (query or "").strip()
+    if not candidate:
+        raise SafariError("Search query is required.")
+    if any(ch in candidate for ch in "\r\n\x00"):
+        raise SafariError("Search query must not contain control characters.")
+    if len(candidate) > MAX_SEARCH_LEN:
+        raise SafariError(f"Search query is limited to {MAX_SEARCH_LEN} characters.")
+    return validate_url(f"https://www.google.com/search?q={quote_plus(candidate)}")
+
+
+def close_tab(
+    *,
+    window_index: int,
+    tab_index: int,
+    name: str,
+    url: str,
+) -> None:
+    """Close a tab only if its frozen name/url snapshot still matches."""
+    if not isinstance(window_index, int) or isinstance(window_index, bool) or window_index < 1:
+        raise SafariError("window_index must be a positive integer.")
+    if not isinstance(tab_index, int) or isinstance(tab_index, bool) or tab_index < 1:
+        raise SafariError("tab_index must be a positive integer.")
+    if any(ch in (name or "") for ch in "\r\n\x00"):
+        raise SafariError("tab name must not contain control characters.")
+    canonical = validate_url(url)
+    script = """on run argv
+    set wIdx to item 1 of argv as integer
+    set tIdx to item 2 of argv as integer
+    set expectedName to item 3 of argv
+    set expectedURL to item 4 of argv
+    tell application "Safari"
+        set theTab to tab tIdx of window wIdx
+        if (name of theTab) is not expectedName then error "Safari tab name changed"
+        if (URL of theTab) is not expectedURL then error "Safari tab URL changed"
+        close theTab
+    end tell
+end run"""
+    _run(script, str(window_index), str(tab_index), name, canonical)
+
+
+def page_text(
+    *,
+    window_index: int,
+    tab_index: int,
+    name: str,
+    url: str,
+    max_chars: int = MAX_PAGE_CHARS,
+) -> str:
+    """Return Safari tab source text. Never executes JavaScript."""
+    if not isinstance(window_index, int) or isinstance(window_index, bool) or window_index < 1:
+        raise SafariError("window_index must be a positive integer.")
+    if not isinstance(tab_index, int) or isinstance(tab_index, bool) or tab_index < 1:
+        raise SafariError("tab_index must be a positive integer.")
+    if not 1 <= max_chars <= MAX_PAGE_CHARS:
+        raise SafariError(f"max_chars must be between 1 and {MAX_PAGE_CHARS}.")
+    if any(ch in (name or "") for ch in "\r\n\x00"):
+        raise SafariError("tab name must not contain control characters.")
+    canonical = validate_url(url)
+    script = """on run argv
+    set wIdx to item 1 of argv as integer
+    set tIdx to item 2 of argv as integer
+    set expectedName to item 3 of argv
+    set expectedURL to item 4 of argv
+    tell application "Safari"
+        set theTab to tab tIdx of window wIdx
+        if (name of theTab) is not expectedName then error "Safari tab name changed"
+        if (URL of theTab) is not expectedURL then error "Safari tab URL changed"
+        return source of theTab
+    end tell
+end run"""
+    raw = _run(script, str(window_index), str(tab_index), name, canonical)
+    return raw[:max_chars]

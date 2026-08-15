@@ -24,10 +24,10 @@ actions without explicit local approval.
 |---|---|---|
 | Metadata / health | `icloud_doctor`, folder counts, domain list | free |
 | Sensitive read | SMS/iMessage bodies, email bodies, full contacts, notes | free over MCP (content enters agent context); FDA/Automation OS gates apply |
-| Externally visible / mutate | send mail, flag/move/trash mail, send iMessage, create/update/delete contacts, calendar write, notes update, drive rm, mail apply, Safari open-url, Music playback, Maps open | **prepare preview → explicit chat OK → Touch ID / macOS password** |
+| Externally visible / mutate | send mail, flag/move/trash/create-folder mail, send iMessage (optional attach), create/update/delete contacts, calendar write, notes update, drive mkdir/put/rm, mail apply, Safari open/search/close, Music playback/volume/shuffle/repeat/play, Maps open, Photos favorite/album-add, ops cleanup-agent | **prepare preview → explicit chat OK → Touch ID / macOS password** |
 
 - CLI: dry-run plans + `--apply`.
-- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~66 tools).  
+- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~83 tools).  
   Draft store TTL 10 minutes, single-use; helper `native-approval.swift` compiled to
   `~/Library/Application Support/icloudseal-mcp/bin/native-approval` (mode `0500`).
 - MCP SDK is pinned to the supported major range `mcp>=2,<3`; tool failures use
@@ -43,22 +43,35 @@ Prepare resolves every mutable selector before native approval:
 
 - Mail: canonical embedded plan + SHA-256, exact UIDs/message metadata, and
   mailbox `UIDVALIDITY`; execution rechecks all values in the selected mailbox.
-  SMTP send freezes From/To/Cc/Bcc/subject/body/Message-ID and rehashes before
-  delivery. From is always the Keychain email.
+  SMTP send freezes From/To/Cc/Bcc/subject/body/Message-ID plus optional
+  In-Reply-To, References, and attachment snapshots, then rehashes before
+  delivery. From is always the Keychain email. Extra flags use tokens
+  (`+Flagged`, `-Answered`); raw IMAP `\Flagged` is rejected.
 - Contacts/Calendar: exact href, ETag, UID, and raw vCard/iCalendar document.
   Unknown properties, recurrence, and alarms are preserved on update.
+  Event create/update may freeze a validated IANA timezone and ATTENDEE
+  mailto lines.
 - Notes: exact Notes.app ID, modified date, body, and body hash.
 - Drive: resolved source/destination or removal target, stat identity, and
-  content/tree hashes; overwrite must be explicit.
-- Photos: exact asset UUID/catalog path and downloaded-original hash. Exports
-  use UUID-prefixed filenames and a new destination directory.
-- Safari: exact `http`/`https` URL plus `new_tab`/`new_window`. No implicit
-  scheme prefix. Page source and JavaScript are not frozen or executed.
-- Music: playback action plus a now-playing snapshot for the Touch ID preview.
-  Scripts are constant (`playpause` / `next track` / `previous track`).
+  content/tree hashes; overwrite must be explicit. mkdir freezes the
+  relative path and refuses Drive root or an existing dest.
+- Photos: export freezes asset UUID/catalog path and downloaded-original hash.
+  Favorite / album-add freeze filename (not UUID) plus favorite/album.
+  Import is not implemented.
+- Safari: exact `http`/`https` URL plus `new_tab`/`new_window`. Search reuses
+  that contract after building a Google URL. Close-tab freezes
+  `window_index`/`tab_index` plus name/url snapshot. Page text is
+  size-capped and read-only. JavaScript is not executed.
+- Music: playback action plus a now-playing snapshot. Constant scripts stay
+  `playpause` / `next track` / `previous track`. Volume/shuffle/repeat/play
+  pass argv-only values (`level`, `mode`, `query`).
 - Maps: exact `https://maps.apple.com/?…` URL plus the frozen query
-  params. Open rebuilds the URL from those params, refuses if it no
-  longer matches the approved URL, then launches `/usr/bin/open`.
+  params (`q`/`ll`/`daddr` plus optional `z`/`t`). Open rebuilds the URL
+  from those params, refuses if it no longer matches the approved URL,
+  then launches `/usr/bin/open`.
+- Ops: cleanup-agent freezes destination, interval, label, and plist hash.
+  Execution writes the plist and never `launchctl load`s it.
+- Health: status is fail-closed. There is no working sample reader.
 
 Query strings, mutable plan-file references, and post-approval re-searches are
 not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
@@ -71,7 +84,8 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
   must be new and Drive overwrite requires explicit approval.
 - Notes, Messages, Finder, and Safari AppleScript receive untrusted values
   through `argv`; no dynamic value is interpolated into AppleScript source.
-  Music playback scripts take no arguments.
+  Music playback scripts take no arguments. Volume/shuffle/repeat/play
+  and Photos favorite/album-add also use argv.
 
 ## Domains (live CLI + MCP)
 
@@ -81,15 +95,19 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
 4. Messages / SMS — `~/Library/Messages/chat.db` (Full Disk Access)
 5. Notes — AppleScript
 6. iCloud Drive — filesystem under CloudDocs
-7. Photos — `Photos.sqlite` read + best-effort export
-8. Safari — AppleScript tabs/current + gated http(s) open
-9. Music — AppleScript now-playing + gated playpause/next/previous
-10. Weather — Open-Meteo HTTPS current + short daily forecast
-11. Maps — documented `maps.apple.com` URL search + gated open
+7. Photos — `Photos.sqlite` read + best-effort export + gated favorite/album-add
+8. Safari — AppleScript tabs/current/page-text + gated http(s) open/search/close
+9. Music — AppleScript now-playing + gated playback/volume/shuffle/repeat/play
+10. Weather — Open-Meteo HTTPS current + short daily forecast (hourly opt-in)
+11. Maps — documented `maps.apple.com` URL search + gated open (optional z/t)
+12. Health — fail-closed status until a signed HealthKit helper exists
+13. Ops — LaunchAgent plist write for `mail cleanup strict` (no load)
 
 **Not supported:** WhatsApp (use `whatseal-mcp`). Instagram (use `instaseal-mcp`).
-HealthKit (needs a signed native helper). WeatherKit / MapKit entitlements.
-Weather.app / Maps.app scraping. Device location / CoreLocation.
+Working HealthKit reads (needs a *separate* signed native helper; status is
+fail-closed and Health.app is not scraped). WeatherKit / MapKit entitlements.
+Weather.app / Maps.app scraping. Device location / CoreLocation. AirPlay.
+Safari `do JavaScript`. Photos import/upload.
 
 ## Credential / storage identity
 

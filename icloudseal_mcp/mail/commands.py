@@ -12,6 +12,7 @@ the exact same command set.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -24,10 +25,25 @@ from ..common import (
     parse_since,
     write_json_file,
 )
-from ..paths import default_plan_path, now_utc_iso
+from ..paths import default_plan_path, export_path, now_utc_iso
 from . import cache, cleanup, jobs
-from .imap_client import open_session
-from .smtp_client import SMTPError, freeze_send, send_frozen
+from .imap_client import IMAPError, open_session
+from .smtp_client import (
+    MAX_ATTACHMENT_BYTES,
+    SMTPError,
+    freeze_send,
+    send_frozen,
+)
+
+ALLOWED_FLAG_TOKENS = {
+    "+Seen": r"(\Seen)",
+    "-Seen": r"(\Seen)",
+    "+Flagged": r"(\Flagged)",
+    "-Flagged": r"(\Flagged)",
+    "+Answered": r"(\Answered)",
+    "-Answered": r"(\Answered)",
+}
+FLAG_ADD = frozenset({"+Seen", "+Flagged", "+Answered"})
 
 # ---- helpers -----------------------------------------------------------
 
@@ -547,28 +563,39 @@ def cmd_mark_unread(args: argparse.Namespace) -> int:
     return _cmd_flags(args, seen=False)
 
 
-def _cmd_flags(args: argparse.Namespace, *, seen: bool) -> int:
+def _cmd_flags(args: argparse.Namespace, *, seen: bool | None = None, flag: str | None = None) -> int:
     uids = _parse_uids(args.uids)
     messages = _cached_mail_targets(folder=args.folder, uids=uids)
-    label = "read" if seen else "unread"
-    console.rule(f"Mark mail {label}" if args.apply else f"Mark mail {label} (dry-run)")
+    token = flag
+    if token is None:
+        if seen is None:
+            raise SystemExit("Provide --flag or use mark-read / mark-unread.")
+        token = "+Seen" if seen else "-Seen"
+    if token not in ALLOWED_FLAG_TOKENS:
+        raise SystemExit("flag must be +Seen/-Seen, +Flagged/-Flagged, or +Answered/-Answered.")
+    console.rule(f"Mail flags {token}" if args.apply else f"Mail flags {token} (dry-run)")
     console.print(f"Folder: {args.folder}")
     _print_mail_targets(messages)
     if not args.apply:
-        console.print(f"[yellow]Dry-run.[/yellow] Add --apply to mark {label}.")
+        console.print(f"[yellow]Dry-run.[/yellow] Add --apply to apply {token}.")
         return 0
     creds = auth.load_credentials()
+    imap_flag = ALLOWED_FLAG_TOKENS[token]
     with open_session(creds.email, creds.password) as imap:
         imap.select(args.folder, readonly=False)
-        if seen:
-            imap.add_flags(uids, r"(\Seen)")
+        if token in FLAG_ADD:
+            imap.add_flags(uids, imap_flag)
         else:
-            imap.remove_flags(uids, r"(\Seen)")
+            imap.remove_flags(uids, imap_flag)
         refreshed = list(imap.fetch_metadata(uids))
     with cache.connect() as conn:
         cache.upsert_messages(conn, refreshed)
-    console.print(f"[green]Marked {len(uids)} message(s) {label}.[/green]")
+    console.print(f"[green]Applied {token} to {len(uids)} message(s).[/green]")
     return 0
+
+
+def cmd_flags(args: argparse.Namespace) -> int:
+    return _cmd_flags(args, flag=args.flag)
 
 
 def cmd_move(args: argparse.Namespace) -> int:
@@ -623,6 +650,31 @@ def cmd_trash(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cli_attachments(paths: list[str] | None) -> list[dict]:
+    if not paths:
+        return []
+    out: list[dict] = []
+    for raw in paths:
+        source = Path(raw).expanduser().resolve()
+        if not source.is_file():
+            raise SystemExit(f"Attachment not found: {source}")
+        size = source.stat().st_size
+        if size <= 0 or size > MAX_ATTACHMENT_BYTES:
+            raise SystemExit(
+                f"Attachment {source.name!r} exceeds the {MAX_ATTACHMENT_BYTES} byte cap."
+            )
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        out.append(
+            {
+                "path": str(source),
+                "name": source.name,
+                "size": size,
+                "sha256": digest,
+            }
+        )
+    return out
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     creds = auth.load_credentials()
     try:
@@ -633,6 +685,9 @@ def cmd_send(args: argparse.Namespace) -> int:
             body=args.body,
             cc=args.cc,
             bcc=args.bcc,
+            in_reply_to=args.in_reply_to,
+            references=args.references,
+            attachments=_cli_attachments(args.attach),
         )
     except SMTPError as exc:
         raise SystemExit(str(exc)) from exc
@@ -645,6 +700,13 @@ def cmd_send(args: argparse.Namespace) -> int:
     console.print(f"Subject: {frozen['subject']}")
     console.print(f"Body chars: {len(frozen['body'])}")
     console.print(f"Message-ID: {frozen['messageId']}")
+    if frozen.get("inReplyTo"):
+        console.print(f"In-Reply-To: {frozen['inReplyTo']}")
+    if frozen.get("references"):
+        console.print(f"References: {frozen['references']}")
+    if frozen.get("attachments"):
+        names = ", ".join(item["name"] for item in frozen["attachments"])
+        console.print(f"Attachments: {names}")
     if not args.apply:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to send via SMTP.")
         return 0
@@ -655,6 +717,74 @@ def cmd_send(args: argparse.Namespace) -> int:
     console.print(
         f"[green]Sent[/green] {result['subject']!r} to {result['recipients']} recipient(s)."
     )
+    return 0
+
+
+def cmd_create_folder(args: argparse.Namespace) -> int:
+    name = (args.folder or "").strip()
+    if not name or len(name) > 255:
+        raise SystemExit("Folder name must be a non-empty string.")
+    if any(ch in name for ch in "\r\n\x00"):
+        raise SystemExit("Folder name must not contain control characters.")
+    console.rule("Create mail folder" if args.apply else "Create mail folder (dry-run)")
+    console.print(f"Folder: {name}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to create the folder.")
+        return 0
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.create_folder(name)
+    except IMAPError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(f"[green]Created folder[/green] {name}")
+    return 0
+
+
+def cmd_attachments(args: argparse.Namespace) -> int:
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.select(args.folder, readonly=True)
+            items = imap.list_attachments(args.uid)
+    except IMAPError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        print(json.dumps(items, indent=2))
+        return 0
+    if not items:
+        console.print("[dim]No attachments.[/dim]")
+        return 0
+    for item in items:
+        console.print(
+            f"[{item['index']}] {item['filename']} "
+            f"{item['contentType']} {human_size(int(item['size']))}"
+        )
+    return 0
+
+
+def cmd_export_attachment(args: argparse.Namespace) -> int:
+    try:
+        dest = export_path(args.dest)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if dest.exists():
+        raise SystemExit(f"Export output already exists: {dest}")
+    console.rule("Export attachment" if args.apply else "Export attachment (dry-run)")
+    console.print(f"Folder: {args.folder} UID: {args.uid} Index: {args.index}")
+    console.print(f"Dest: {dest}")
+    if not args.apply:
+        console.print("[yellow]Dry-run.[/yellow] Add --apply to write the file.")
+        return 0
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    creds = auth.load_credentials()
+    try:
+        with open_session(creds.email, creds.password) as imap:
+            imap.select(args.folder, readonly=True)
+            result = imap.export_attachment(args.uid, args.index, str(dest))
+    except IMAPError as exc:
+        raise SystemExit(str(exc)) from exc
+    console.print(f"[green]Exported[/green] {result['filename']} -> {result['path']}")
     return 0
 
 
@@ -754,6 +884,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--body", required=True)
     sp.add_argument("--cc", help="Comma-separated Cc recipients")
     sp.add_argument("--bcc", help="Comma-separated Bcc recipients")
+    sp.add_argument("--in-reply-to", help="Message-ID this send replies to")
+    sp.add_argument("--references", help="References header for the thread")
+    sp.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        help="Local file to attach (repeatable, size-capped)",
+    )
     sp.add_argument("--apply", action="store_true", help="Actually send the message")
     sp.set_defaults(func=cmd_send)
 
@@ -786,6 +924,43 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_argument("--folder", default="INBOX")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_trash)
+
+    sp = sub.add_parser(
+        "flags",
+        help="Add or remove IMAP flags on cached messages. Requires --apply.",
+    )
+    sp.add_argument("--uids", required=True, help="Comma-separated IMAP UIDs")
+    sp.add_argument(
+        "--flag",
+        required=True,
+        choices=sorted(ALLOWED_FLAG_TOKENS),
+        help="Flag token: +Seen/-Seen, +Flagged/-Flagged, +Answered/-Answered",
+    )
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_flags)
+
+    sp = sub.add_parser("create-folder", help="Create an IMAP folder. Requires --apply.")
+    sp.add_argument("--folder", required=True, help="Folder name to create")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_create_folder)
+
+    sp = sub.add_parser("attachments", help="List attachments on one cached message.")
+    sp.add_argument("uid", type=int)
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_attachments)
+
+    sp = sub.add_parser(
+        "export-attachment",
+        help="Export one attachment into the local exports jail. Requires --apply.",
+    )
+    sp.add_argument("uid", type=int)
+    sp.add_argument("--index", type=int, required=True)
+    sp.add_argument("--dest", required=True, help="Filename or path inside the exports jail")
+    sp.add_argument("--folder", default="INBOX")
+    sp.add_argument("--apply", action="store_true")
+    sp.set_defaults(func=cmd_export_attachment)
 
 
 __all__ = ["register"]

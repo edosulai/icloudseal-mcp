@@ -171,6 +171,14 @@ class ICloudIMAP:
         except (TypeError, ValueError) as exc:
             raise IMAPError(f"Invalid UIDVALIDITY response: {raw!r}") from exc
 
+    def create_folder(self, folder: str) -> None:
+        """Create an IMAP mailbox. Name is already validated by the caller."""
+        assert self._conn is not None
+        quoted = f'"{folder}"'
+        typ, data = self._conn.create(quoted)
+        if typ != "OK":
+            raise IMAPError(f"CREATE {folder!r} failed: {typ} {data!r}")
+
     def folder_count(self, folder: str) -> int:
         """Get message count for a folder without disturbing current selection."""
         assert self._conn is not None
@@ -276,6 +284,58 @@ class ICloudIMAP:
         if not data or not isinstance(data[0], tuple):
             raise IMAPError(f"No body returned for UID {uid}")
         return email.message_from_bytes(data[0][1])
+
+    def list_attachments(self, uid: int) -> list[dict[str, object]]:
+        """Describe MIME attachments without writing anything to disk."""
+        msg = self.fetch_body(uid)
+        items: list[dict[str, object]] = []
+        index = 0
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            disposition = (part.get("Content-Disposition") or "").lower()
+            filename = part.get_filename()
+            if not filename and "attachment" not in disposition:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            items.append(
+                {
+                    "index": index,
+                    "filename": filename or f"part-{index}.bin",
+                    "contentType": part.get_content_type(),
+                    "size": len(payload),
+                }
+            )
+            index += 1
+        return items
+
+    def export_attachment(self, uid: int, index: int, dest: str) -> dict[str, object]:
+        """Write one MIME part to dest. Caller must jail dest first."""
+        items = []
+        msg = self.fetch_body(uid)
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            disposition = (part.get("Content-Disposition") or "").lower()
+            filename = part.get_filename()
+            if not filename and "attachment" not in disposition:
+                continue
+            items.append(part)
+        if index < 0 or index >= len(items):
+            raise IMAPError(f"Attachment index {index} is out of range.")
+        part = items[index]
+        payload = part.get_payload(decode=True) or b""
+        from pathlib import Path
+
+        path = Path(dest)
+        path.write_bytes(payload)
+        return {
+            "uid": uid,
+            "index": index,
+            "filename": part.get_filename() or path.name,
+            "path": str(path),
+            "size": len(payload),
+        }
 
     # ---- mutations (Phase 2) ------------------------------------------
 

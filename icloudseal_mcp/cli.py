@@ -18,18 +18,20 @@ from .calendar import commands as calendar_commands
 from .common import console
 from .contacts import commands as contacts_commands
 from .drive import commands as drive_commands
+from .health import commands as health_commands
 from .mail import commands as mail_commands
 from .maps import commands as maps_commands
 from .messages import commands as messages_commands
 from .music import commands as music_commands
 from .notes import commands as notes_commands
+from .ops import commands as ops_commands
 from .photos import commands as photos_commands
 from .safari import commands as safari_commands
 from .weather import commands as weather_commands
 
 DOMAINS = {
     "mail": (
-        "iCloud Mail (IMAP + SMTP): triage, cleanup, gated send/flags/move/trash.",
+        "iCloud Mail (IMAP + SMTP): triage, cleanup, gated send/flags/move/trash/folder.",
         mail_commands.register,
     ),
     "contacts": (
@@ -45,32 +47,40 @@ DOMAINS = {
         messages_commands.register,
     ),
     "notes": (
-        "iCloud Notes (AppleScript): list/read, gated create/update/delete.",
+        "iCloud Notes (AppleScript): list/read/folders, gated create/update/delete.",
         notes_commands.register,
     ),
     "drive": (
-        "iCloud Drive (filesystem): ls/tree/find/read, gated put/rm.",
+        "iCloud Drive (filesystem): ls/tree/find/read, gated mkdir/put/rm.",
         drive_commands.register,
     ),
     "photos": (
-        "iCloud Photos: read-only stats/albums/list + best-effort export.",
+        "iCloud Photos: stats/albums/list, gated export/favorite/album-add.",
         photos_commands.register,
     ),
     "safari": (
-        "Safari (AppleScript): list tabs, gated http(s) open.",
+        "Safari (AppleScript): tabs/page-text, gated open/search/close.",
         safari_commands.register,
     ),
     "music": (
-        "Music.app (AppleScript): now-playing, gated playpause/next/previous.",
+        "Music.app (AppleScript): now-playing, gated playback/volume/shuffle/repeat.",
         music_commands.register,
     ),
     "weather": (
-        "Weather (Open-Meteo): current plus a short daily forecast.",
+        "Weather (Open-Meteo): current plus daily/hourly forecast.",
         weather_commands.register,
     ),
     "maps": (
         "Apple Maps URL: local search preview, gated open in Maps.app.",
         maps_commands.register,
+    ),
+    "health": (
+        "HealthKit status (fail-closed until a signed helper exists).",
+        health_commands.register,
+    ),
+    "ops": (
+        "Ops helpers: write a mail-cleanup LaunchAgent plist (does not load).",
+        ops_commands.register,
     ),
 }
 

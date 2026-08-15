@@ -92,8 +92,33 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
-def _applescript_send(to: str, text: str, *, service: str) -> None:
-    script = """on run argv
+def _applescript_send(
+    to: str,
+    text: str,
+    *,
+    service: str,
+    attachment: str | None = None,
+) -> None:
+    if attachment:
+        script = """on run argv
+    set recipient to item 1 of argv
+    set messageText to item 2 of argv
+    set requestedService to item 3 of argv
+    set filePath to item 4 of argv
+    tell application "Messages"
+        if requestedService is "imessage" then
+            set targetService to 1st account whose service type = iMessage
+        else
+            set targetService to 1st account whose service type = SMS
+        end if
+        set targetBuddy to participant recipient of targetService
+        if messageText is not "" then send messageText to targetBuddy
+        send (POSIX file filePath) to targetBuddy
+    end tell
+end run"""
+        args = [to, text, service, attachment]
+    else:
+        script = """on run argv
     set recipient to item 1 of argv
     set messageText to item 2 of argv
     set requestedService to item 3 of argv
@@ -107,8 +132,9 @@ def _applescript_send(to: str, text: str, *, service: str) -> None:
         send messageText to targetBuddy
     end tell
 end run"""
+        args = [to, text, service]
     result = subprocess.run(
-        ["osascript", "-e", script, "--", to, text, service],
+        ["osascript", "-e", script, "--", *args],
         capture_output=True,
         text=True,
         check=False,
@@ -118,15 +144,17 @@ end run"""
 
 
 def cmd_send(args: argparse.Namespace) -> int:
+    attach = getattr(args, "attachment", None)
+    extra = f"\n  file: {attach}" if attach else ""
     console.print(
         f"Would send via [bold]{args.service}[/bold] to [bold]{args.to}[/bold]:\n"
-        f"  {args.text}"
+        f"  {args.text}{extra}"
     )
     if not args.apply:
         console.print("[yellow]Dry-run.[/yellow] Add --apply to actually send.")
         return 0
     try:
-        _applescript_send(args.to, args.text, service=args.service)
+        _applescript_send(args.to, args.text, service=args.service, attachment=attach)
     except RuntimeError as exc:
         console.print(f"[red]Send failed:[/red] {exc}")
         return 2
@@ -161,6 +189,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp = sub.add_parser("send", help="Send a message via Messages.app. Requires --apply.")
     sp.add_argument("--to", required=True, help="Phone number or email")
     sp.add_argument("--text", required=True)
+    sp.add_argument("--file", dest="attachment", help="Optional local file to attach")
     sp.add_argument("--service", choices=["imessage", "sms"], default="imessage")
     sp.add_argument("--apply", action="store_true")
     sp.set_defaults(func=cmd_send)

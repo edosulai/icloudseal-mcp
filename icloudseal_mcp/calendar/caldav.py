@@ -16,6 +16,9 @@ from urllib.parse import urljoin
 
 from .. import auth
 from ..dav.client import CALDAV_BASE, NS, DavClient, DavError
+from ..mail.smtp_client import normalize_addresses
+
+_TZID_RE = re.compile(r"^[A-Za-z0-9_+\-/]+$")
 
 CAL_NS = "urn:ietf:params:xml:ns:caldav"
 
@@ -122,17 +125,33 @@ def parse_calitem(text: str, kind: str) -> CalItem:
     )
 
 
-def _ical_dt(value: str, *, all_day: bool = False) -> tuple[str, str]:
+def validate_timezone(value: str) -> str:
+    token = (value or "").strip()
+    if not token or len(token) > 64 or not _TZID_RE.fullmatch(token):
+        raise ValueError("timezone must be an IANA-like token (e.g. America/Los_Angeles).")
+    return token
+
+
+def _ical_dt(value: str, *, all_day: bool = False, timezone: str | None = None) -> tuple[str, str]:
     """Return (param, formatted) for a DTSTART/DTEND/DUE value.
 
     Accepts 'YYYY-MM-DD' (all-day) or 'YYYY-MM-DD HH:MM' (floating local time).
+    Optional TZID is a validated IANA-like token and never interpolated raw.
     """
     value = value.strip()
     if all_day or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         d = datetime.strptime(value[:10], "%Y-%m-%d")
         return ";VALUE=DATE", d.strftime("%Y%m%d")
     dt = datetime.strptime(value, "%Y-%m-%d %H:%M")
+    if timezone:
+        tzid = validate_timezone(timezone)
+        return f";TZID={tzid}", dt.strftime("%Y%m%dT%H%M%S")
     return "", dt.strftime("%Y%m%dT%H%M%S")
+
+
+def _attendee_lines(attendees: list[str] | str | None) -> list[str]:
+    addresses = normalize_addresses(attendees, field="attendee")
+    return [f"ATTENDEE:mailto:{addr}" for addr in addresses]
 
 
 def _now_stamp() -> str:
@@ -142,18 +161,20 @@ def _now_stamp() -> str:
 def build_event(
     *, uid: str, summary: str, start: str, end: str | None = None,
     location: str = "", all_day: bool = False,
+    timezone: str | None = None, attendees: list[str] | str | None = None,
 ) -> str:
-    sp, sv = _ical_dt(start, all_day=all_day)
+    sp, sv = _ical_dt(start, all_day=all_day, timezone=timezone)
     lines = [
         "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//icloudseal-mcp//EN",
         "BEGIN:VEVENT", f"UID:{uid}", f"DTSTAMP:{_now_stamp()}",
         f"DTSTART{sp}:{sv}", f"SUMMARY:{summary}",
     ]
     if end:
-        ep, ev = _ical_dt(end, all_day=all_day)
+        ep, ev = _ical_dt(end, all_day=all_day, timezone=timezone)
         lines.append(f"DTEND{ep}:{ev}")
     if location:
         lines.append(f"LOCATION:{location}")
+    lines.extend(_attendee_lines(attendees))
     lines += ["END:VEVENT", "END:VCALENDAR"]
     return "\r\n".join(lines) + "\r\n"
 
@@ -184,9 +205,14 @@ def update_event(
     end: str | None = None,
     location: str | None = None,
     all_day: bool | None = None,
+    timezone: str | None = None,
+    attendees: list[str] | str | None = None,
 ) -> str:
     """Patch exposed VEVENT fields without erasing recurrence, alarms, or metadata."""
-    if all(value is None for value in (summary, start, end, location)):
+    if all(
+        value is None
+        for value in (summary, start, end, location, attendees, timezone)
+    ):
         raise ValueError("Provide at least one event field to update.")
 
     stamp = _now_stamp()
@@ -199,14 +225,15 @@ def update_event(
     if summary is not None:
         replacements["SUMMARY"] = f"SUMMARY:{summary}"
     if start is not None:
-        start_param, start_value = _ical_dt(start, all_day=use_all_day)
+        start_param, start_value = _ical_dt(start, all_day=use_all_day, timezone=timezone)
         replacements["DTSTART"] = f"DTSTART{start_param}:{start_value}"
     if end is not None:
         end_is_date = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", end.strip()))
-        end_param, end_value = _ical_dt(end, all_day=use_all_day or end_is_date)
+        end_param, end_value = _ical_dt(end, all_day=use_all_day or end_is_date, timezone=timezone)
         replacements["DTEND"] = f"DTEND{end_param}:{end_value}"
     if location is not None:
         replacements["LOCATION"] = f"LOCATION:{location}" if location else None
+    attendee_lines = None if attendees is None else _attendee_lines(attendees)
 
     emitted: set[str] = set()
     sequence_emitted = False
@@ -232,12 +259,16 @@ def update_event(
             for name, value in replacements.items():
                 if name not in emitted and value is not None:
                     output.append(value)
+            if attendee_lines is not None:
+                output.extend(attendee_lines)
             if not sequence_emitted:
                 output.append(f"SEQUENCE:{current_seq + 1}")
             in_event = False
             output.append(line)
             continue
         name = line.split(":", 1)[0].split(";", 1)[0].upper()
+        if in_event and not in_alarm and attendee_lines is not None and name == "ATTENDEE":
+            continue
         if in_event and not in_alarm and name == "SEQUENCE":
             try:
                 current_seq = int(line.split(":", 1)[1].strip())

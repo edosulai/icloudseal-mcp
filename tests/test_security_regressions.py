@@ -16,14 +16,23 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from icloudseal_mcp import auth
-from icloudseal_mcp.calendar.caldav import complete_reminder, update_event, update_reminder
+from icloudseal_mcp.calendar.caldav import (
+    build_event,
+    complete_reminder,
+    update_event,
+    update_reminder,
+    validate_timezone,
+)
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
+from icloudseal_mcp.health.helper import HealthError, health_status, read_samples
 from icloudseal_mcp.mail.smtp_client import SMTPError, freeze_send, send_frozen
+from icloudseal_mcp.ops.cleanup_agent import generate_mail_cleanup_plist
 from icloudseal_mcp.maps import urls as maps_urls
 from icloudseal_mcp.mcp import approval, services
 from icloudseal_mcp.music import applescript as music_script
 from icloudseal_mcp.notes import applescript
 from icloudseal_mcp.paths import managed_path
+from icloudseal_mcp.photos import applescript as photos_script
 from icloudseal_mcp.safari import applescript as safari_script
 from icloudseal_mcp.weather import client as weather_client
 
@@ -129,7 +138,7 @@ def test_notes_values_are_passed_via_argv(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     applescript.read_note(malicious)
-    applescript.create_note(malicious, malicious)
+    applescript.create_note(malicious, malicious, folder=malicious)
     applescript.update_note(malicious, title=malicious, body=malicious)
     applescript.delete_note(malicious)
 
@@ -138,6 +147,7 @@ def test_notes_values_are_passed_via_argv(monkeypatch: pytest.MonkeyPatch) -> No
         assert malicious not in script
         assert "--" in command
     assert malicious in calls[0][4:]
+    assert malicious in calls[1][4:]
 
 
 def test_safari_url_rejects_unsafe_schemes() -> None:
@@ -657,3 +667,312 @@ class _FakeSMTP:
         self.message = message
         self.from_addr = from_addr
         self.to_addrs = list(to_addrs or [])
+
+
+def test_freeze_send_keeps_reply_headers_and_attachment_snapshots(
+    tmp_path: Path,
+) -> None:
+    attachment = tmp_path / "note.txt"
+    attachment.write_text("hello", encoding="utf-8")
+    digest = "a" * 64
+    frozen = freeze_send(
+        from_addr="jane@example.com",
+        to="boss@example.com",
+        subject="Re: Hello",
+        body="Hi again",
+        in_reply_to="<orig@example.com>",
+        references="<orig@example.com>",
+        attachments=[
+            {
+                "path": str(attachment),
+                "name": "note.txt",
+                "size": attachment.stat().st_size,
+                "sha256": digest,
+            }
+        ],
+    )
+    assert frozen["inReplyTo"] == "<orig@example.com>"
+    assert frozen["references"] == "<orig@example.com>"
+    assert frozen["attachments"][0]["name"] == "note.txt"
+    assert frozen["attachments"][0]["sha256"] == digest
+    with pytest.raises(SMTPError, match="newlines"):
+        freeze_send(
+            from_addr="jane@example.com",
+            to="boss@example.com",
+            subject="Hello",
+            body="Hi",
+            in_reply_to="bad\nid",
+        )
+
+
+def test_mail_flags_accept_extra_tokens_but_still_reject_raw_imap() -> None:
+    for token in ("+Flagged", "-Flagged", "+Answered", "-Answered"):
+        plan = {
+            "version": 1,
+            "folder": "INBOX",
+            "action": "flags",
+            "flag": token,
+            "messages": [{"uid": 7, "subject": "Review me"}],
+        }
+        assert services.validate_mail_plan(plan)["flag"] == token
+    with pytest.raises(services.ServiceError, match="Flag plan"):
+        services.validate_mail_plan(
+            {
+                "version": 1,
+                "folder": "INBOX",
+                "action": "flags",
+                "flag": "\\Flagged",
+                "messages": [{"uid": 7, "subject": "Review me"}],
+            }
+        )
+
+
+def test_prepare_mail_create_folder_rejects_controls() -> None:
+    frozen = services.prepare_mail_create_folder("Archive/2026")
+    assert frozen == {"folder": "Archive/2026"}
+    with pytest.raises(services.ServiceError, match="control"):
+        services.prepare_mail_create_folder("Inbox\nINBOX")
+
+
+def test_drive_mkdir_refuses_root_and_existing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drive = tmp_path / "CloudDocs"
+    drive.mkdir()
+    (drive / "exists").mkdir()
+    monkeypatch.setattr(services, "DRIVE_ROOT", drive)
+
+    frozen = services.prepare_drive_mkdir("inbox/2026")
+    assert frozen["relative"] == "inbox/2026"
+    assert not Path(frozen["path"]).exists()
+    result = services.exec_drive_mkdir(frozen)
+    assert result["created"] is True
+    assert (drive / "inbox" / "2026").is_dir()
+
+    with pytest.raises(services.ServiceError, match="Already exists"):
+        services.prepare_drive_mkdir("exists")
+    with pytest.raises(services.ServiceError, match="root"):
+        services.prepare_drive_mkdir(".")
+
+
+def test_event_attendees_and_timezone_are_validated() -> None:
+    ics = build_event(
+        uid="E1",
+        summary="Sync",
+        start="2026-04-01 09:00",
+        end="2026-04-01 10:00",
+        timezone="America/Los_Angeles",
+        attendees="ada@example.com, bob@example.com",
+    )
+    assert "TZID=America/Los_Angeles" in ics
+    assert "ATTENDEE:mailto:ada@example.com" in ics
+    assert "ATTENDEE:mailto:bob@example.com" in ics
+    with pytest.raises(ValueError, match="IANA"):
+        validate_timezone("America/Los Angeles")
+
+    raw = (
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSUMMARY:Standup\r\n"
+        "DTSTART:20260115T090000\r\nDTEND:20260115T093000\r\n"
+        "RRULE:FREQ=WEEKLY\r\nSEQUENCE:2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    updated = update_event(
+        raw,
+        timezone="Europe/Berlin",
+        start="2026-01-15 10:00",
+        attendees="ada@example.com",
+    )
+    assert "TZID=Europe/Berlin" in updated
+    assert "ATTENDEE:mailto:ada@example.com" in updated
+    assert "RRULE:FREQ=WEEKLY" in updated
+    assert "SEQUENCE:3" in updated
+
+
+def test_weather_hourly_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Resp:
+        def __init__(self, payload: dict) -> None:
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._raw
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    forecast_body = {
+        "latitude": 52.52,
+        "longitude": 13.41,
+        "timezone": "Europe/Berlin",
+        "current_units": {
+            "temperature_2m": "°C",
+            "weather_code": "wmo code",
+            "wind_speed_10m": "km/h",
+            "precipitation": "mm",
+        },
+        "current": {
+            "time": "2026-03-26T12:00",
+            "temperature_2m": 11.2,
+            "weather_code": 3,
+            "wind_speed_10m": 14.0,
+            "precipitation": 0.0,
+        },
+        "daily_units": {
+            "temperature_2m_max": "°C",
+            "temperature_2m_min": "°C",
+            "precipitation_sum": "mm",
+            "weather_code": "wmo code",
+        },
+        "daily": {
+            "time": ["2026-03-26"],
+            "weather_code": [3],
+            "temperature_2m_max": [12.0],
+            "temperature_2m_min": [6.0],
+            "precipitation_sum": [0.0],
+        },
+        "hourly": {
+            "time": ["2026-03-26T12:00"],
+            "weather_code": [3],
+            "temperature_2m": [11.2],
+            "precipitation": [0.0],
+            "wind_speed_10m": [14.0],
+        },
+    }
+    urls: list[str] = []
+
+    def fake_open(req: object, timeout: float = 0) -> _Resp:
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        urls.append(url)
+        return _Resp(forecast_body)
+
+    default = weather_client.forecast(
+        latitude=52.52, longitude=13.41, opener=fake_open
+    )
+    assert "hourly" not in default
+    assert "hourly=" not in urls[0]
+
+    hourly = weather_client.forecast(
+        latitude=52.52, longitude=13.41, hourly=True, opener=fake_open
+    )
+    assert "hourly=" in urls[1]
+    assert hourly["hourly"][0]["temperature"] == 11.2
+
+
+def test_maps_optional_zoom_and_type_stay_off_by_default() -> None:
+    built = maps_urls.build_search_url("Cupertino")
+    assert built["url"] == "https://maps.apple.com/?q=Cupertino"
+    extra = maps_urls.build_search_url("Cupertino", zoom=12, map_type="k")
+    assert extra["query"]["z"] == "12"
+    assert extra["query"]["t"] == "k"
+    with pytest.raises(maps_urls.MapsError, match="zoom"):
+        maps_urls.build_search_url("Cupertino", zoom=99)
+    with pytest.raises(maps_urls.MapsError, match="map type"):
+        maps_urls.build_search_url("Cupertino", map_type="fly")
+
+
+def test_safari_search_and_close_use_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert safari_script.search_url("icloud seal") == (
+        "https://www.google.com/search?q=icloud+seal"
+    )
+    frozen = services.prepare_safari_search("icloud seal", target="new_window")
+    assert frozen == {
+        "url": "https://www.google.com/search?q=icloud+seal",
+        "target": "new_window",
+    }
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    safari_script.close_tab(
+        window_index=1,
+        tab_index=2,
+        name="Docs",
+        url="https://example.com/docs",
+    )
+    command = calls[0]
+    assert "https://example.com/docs" not in command[2]
+    assert command[4:] == ["1", "2", "Docs", "https://example.com/docs"]
+
+
+def test_music_controls_use_argv_and_reject_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    music_script.set_volume(40)
+    music_script.set_shuffle("albums")
+    music_script.set_repeat("one")
+    music_script.play_by_name('track" & do shell script "id"')
+    assert calls[0][4:] == ["40"]
+    assert calls[1][4:] == ["albums"]
+    assert calls[2][4:] == ["one"]
+    assert 'track" & do shell script "id"' in calls[3][4:]
+    assert 'do shell script "id"' not in calls[3][2]
+    with pytest.raises(music_script.MusicError):
+        music_script.set_shuffle("random")
+    with pytest.raises(music_script.MusicError):
+        music_script.playback("search")
+
+
+def test_photos_mutations_match_filename_via_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    photos_script.set_favorite("IMG_0001.HEIC", favorite=True)
+    photos_script.add_to_album("IMG_0001.HEIC", "Trip")
+    assert calls[0][4:] == ["IMG_0001.HEIC", "1"]
+    assert calls[1][4:] == ["IMG_0001.HEIC", "Trip"]
+    frozen = services.prepare_photos_favorite("IMG_0001.HEIC", favorite=False)
+    assert frozen == {"filename": "IMG_0001.HEIC", "favorite": False}
+
+
+def test_health_status_is_fail_closed() -> None:
+    status = health_status()
+    assert status["ok"] is False
+    assert "HealthKit" in status["reason"]
+    assert services.health_read()["ok"] is False
+    with pytest.raises(HealthError, match="HealthKit"):
+        read_samples(kind="steps")
+
+
+def test_ops_cleanup_agent_writes_interval_plist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services, "APP_DIR", tmp_path)
+    plist = generate_mail_cleanup_plist(python_exe="/usr/bin/python3", interval=7200)
+    assert "StartInterval" in plist
+    assert "<integer>7200</integer>" in plist
+    assert "mail</string>" in plist
+    assert "cleanup</string>" in plist
+    assert "strict</string>" in plist
+    assert "--apply" in plist
+    frozen = services.prepare_ops_cleanup_agent(interval=7200)
+    assert frozen["interval"] == 7200
+    assert frozen["destination"].endswith("dev.icloudseal.mail-cleanup.plist")
+    result = services.exec_ops_cleanup_agent(frozen)
+    assert result["written"] is True
+    assert result["loaded"] is False
+    written = Path(result["path"])
+    assert written.is_file()
+    assert "StartInterval" in written.read_text(encoding="utf-8")
+    with pytest.raises(services.ServiceError, match="destination"):
+        services.exec_ops_cleanup_agent({**frozen, "destination": str(tmp_path / "other.plist")})

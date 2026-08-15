@@ -27,6 +27,12 @@ class Note:
     modified: str
 
 
+@dataclass(frozen=True)
+class NoteFolder:
+    account: str
+    name: str
+
+
 def _run(script: str, *args: str) -> str:
     result = subprocess.run(
         ["osascript", "-e", script, "--", *args],
@@ -77,9 +83,62 @@ end run"""
     return strip_html(body)
 
 
-def create_note(title: str, body: str) -> None:
+def list_accounts() -> list[str]:
+    script = (
+        'tell application "Notes"\n'
+        "  set output to \"\"\n"
+        "  repeat with a in accounts\n"
+        f'    set output to output & (name of a) & "{RECORD}"\n'
+        "  end repeat\n"
+        "  return output\n"
+        "end tell"
+    )
+    raw = _run(script)
+    return [part.strip() for part in raw.split(RECORD) if part.strip()]
+
+
+def list_folders() -> list[NoteFolder]:
+    script = (
+        'tell application "Notes"\n'
+        "  set output to \"\"\n"
+        "  repeat with a in accounts\n"
+        "    set accountName to name of a\n"
+        "    repeat with f in folders of a\n"
+        f'      set output to output & accountName & "{FIELD}" '
+        f'& (name of f) & "{RECORD}"\n'
+        "    end repeat\n"
+        "  end repeat\n"
+        "  return output\n"
+        "end tell"
+    )
+    raw = _run(script)
+    folders: list[NoteFolder] = []
+    for rec in raw.split(RECORD):
+        if not rec.strip():
+            continue
+        parts = rec.split(FIELD)
+        if len(parts) >= 2:
+            folders.append(NoteFolder(account=parts[0], name=parts[1]))
+    return folders
+
+
+def create_note(title: str, body: str, *, folder: str | None = None) -> None:
     content = f"{title}\n{body}" if body else title
     content_html = html.escape(content).replace("\n", "<br>")
+    if folder:
+        if any(ch in folder for ch in "\r\n\x00"):
+            raise NotesError("Folder name must not contain control characters.")
+        script = """on run argv
+    set noteBody to item 1 of argv
+    set folderName to item 2 of argv
+    tell application "Notes"
+        tell account "iCloud"
+            make new note at folder folderName with properties {body:noteBody}
+        end tell
+    end tell
+end run"""
+        _run(script, content_html, folder)
+        return
     script = """on run argv
     set noteBody to item 1 of argv
     tell application "Notes"

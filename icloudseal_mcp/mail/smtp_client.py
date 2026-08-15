@@ -1,16 +1,19 @@
 """SMTP sender for iCloud Mail.
 
 iCloud SMTP: smtp.mail.me.com:587 (STARTTLS). The same Keychain app-specific
-password used for IMAP authenticates SMTP. No attachments in this first cut.
+password used for IMAP authenticates SMTP. Attachments are size-capped and
+must already be frozen as local path snapshots.
 """
 
 from __future__ import annotations
 
+import mimetypes
 import re
 import smtplib
 from collections.abc import Iterable
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
+from pathlib import Path
 from typing import Any
 
 SMTP_HOST = "smtp.mail.me.com"
@@ -20,6 +23,9 @@ SMTP_TIMEOUT_S = 30
 MAX_SUBJECT_CHARS = 200
 MAX_BODY_CHARS = 20_000
 MAX_RECIPIENTS = 20
+MAX_ATTACHMENTS = 5
+MAX_ATTACHMENT_BYTES = 5_000_000
+MAX_HEADER_CHARS = 200
 
 _EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 
@@ -57,6 +63,52 @@ def normalize_addresses(values: Iterable[str] | str | None, *, field: str) -> li
     return out
 
 
+def _header_token(value: str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    token = _single_line(value, field)
+    if not token:
+        return None
+    if len(token) > MAX_HEADER_CHARS:
+        raise SMTPError(f"{field} exceeds {MAX_HEADER_CHARS} characters.")
+    return token
+
+
+def _freeze_attachments(values: Iterable[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not values:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            raise SMTPError("Each attachment must be an object.")
+        path = Path(str(item.get("path") or "")).expanduser()
+        name = _single_line(str(item.get("name") or path.name), "attachment name")
+        if not name or "/" in name or "\\" in name:
+            raise SMTPError("Attachment name must be a basename.")
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError) as exc:
+            raise SMTPError("Attachment size must be an integer.") from exc
+        sha = _single_line(str(item.get("sha256") or ""), "attachment sha256")
+        if size <= 0 or size > MAX_ATTACHMENT_BYTES:
+            raise SMTPError(
+                f"Attachment {name!r} exceeds the {MAX_ATTACHMENT_BYTES} byte cap."
+            )
+        if len(sha) != 64 or any(ch not in "0123456789abcdef" for ch in sha.lower()):
+            raise SMTPError("Attachment sha256 must be a 64-char hex digest.")
+        out.append(
+            {
+                "path": str(path),
+                "name": name,
+                "size": size,
+                "sha256": sha.lower(),
+            }
+        )
+    if len(out) > MAX_ATTACHMENTS:
+        raise SMTPError(f"Too many attachments ({len(out)}); max is {MAX_ATTACHMENTS}.")
+    return out
+
+
 def freeze_send(
     *,
     from_addr: str,
@@ -66,6 +118,9 @@ def freeze_send(
     cc: Iterable[str] | str | None = None,
     bcc: Iterable[str] | str | None = None,
     message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+    attachments: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate and freeze an outbound message. Does not contact SMTP."""
     sender = normalize_addresses([from_addr], field="from")
@@ -95,6 +150,9 @@ def freeze_send(
 
     mid = message_id or make_msgid(domain="icloudseal-mcp.local")
     _single_line(mid, "message-id")
+    reply = _header_token(in_reply_to, "in-reply-to")
+    refs = _header_token(references, "references")
+    frozen_attachments = _freeze_attachments(attachments)
 
     return {
         "from": sender[0],
@@ -104,6 +162,9 @@ def freeze_send(
         "subject": subject_text,
         "body": body,
         "messageId": mid,
+        "inReplyTo": reply,
+        "references": refs,
+        "attachments": frozen_attachments,
     }
 
 
@@ -115,8 +176,23 @@ def build_message(frozen: dict[str, Any]) -> EmailMessage:
         msg["Cc"] = ", ".join(frozen["cc"])
     msg["Subject"] = frozen["subject"]
     msg["Message-ID"] = frozen["messageId"]
+    if frozen.get("inReplyTo"):
+        msg["In-Reply-To"] = frozen["inReplyTo"]
+    if frozen.get("references"):
+        msg["References"] = frozen["references"]
     msg["Date"] = formatdate(localtime=True)
     msg.set_content(frozen["body"])
+    for item in frozen.get("attachments") or []:
+        path = Path(item["path"])
+        data = path.read_bytes()
+        ctype, _encoding = mimetypes.guess_type(item["name"])
+        maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
+        msg.add_attachment(
+            data,
+            maintype=maintype,
+            subtype=subtype,
+            filename=item["name"],
+        )
     return msg
 
 
@@ -163,6 +239,8 @@ def send_frozen(
 
 
 __all__ = [
+    "MAX_ATTACHMENT_BYTES",
+    "MAX_ATTACHMENTS",
     "MAX_BODY_CHARS",
     "MAX_RECIPIENTS",
     "MAX_SUBJECT_CHARS",

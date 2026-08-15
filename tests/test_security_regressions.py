@@ -19,11 +19,13 @@ from icloudseal_mcp import auth
 from icloudseal_mcp.calendar.caldav import complete_reminder, update_event, update_reminder
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
 from icloudseal_mcp.mail.smtp_client import SMTPError, freeze_send, send_frozen
+from icloudseal_mcp.maps import urls as maps_urls
 from icloudseal_mcp.mcp import approval, services
 from icloudseal_mcp.music import applescript as music_script
 from icloudseal_mcp.notes import applescript
 from icloudseal_mcp.paths import managed_path
 from icloudseal_mcp.safari import applescript as safari_script
+from icloudseal_mcp.weather import client as weather_client
 
 
 def test_outcome_ids_cannot_escape_and_files_are_private(
@@ -212,6 +214,186 @@ def test_prepare_safari_open_url_freezes_canonical_url() -> None:
     assert frozen == {"url": "https://example.com/docs", "target": "new_window"}
     with pytest.raises(services.ServiceError, match="http or https"):
         services.prepare_safari_open_url("javascript:alert(1)")
+
+
+def test_maps_search_is_local_and_rejects_unsafe_urls() -> None:
+    built = maps_urls.build_search_url("Cupertino")
+    assert built["url"] == "https://maps.apple.com/?q=Cupertino"
+    assert built["host"] == "maps.apple.com"
+    assert built["scheme"] == "https"
+    assert maps_urls.validate_maps_url(built["url"]) == built["url"]
+
+    pin = maps_urls.build_search_url("Apple Park", latitude=37.323, longitude=-122.032)
+    assert pin["query"]["ll"] == "37.323,-122.032"
+    assert "q=Apple+Park" in pin["url"] or "q=Apple%20Park" in pin["url"]
+
+    directions = maps_urls.build_directions_url(
+        saddr="Cupertino",
+        daddr="San Francisco",
+        dirflg="d",
+    )
+    assert directions["mode"] == "directions"
+    assert directions["query"]["dirflg"] == "d"
+
+    for bad in (
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "data:text/html,hi",
+        "maps://?q=Cupertino",
+        "http://maps.apple.com/?q=Cupertino",
+        "https://evil.test/?q=Cupertino",
+        "https://maps.apple.com/?q=Cupertino\nhttps://evil.test",
+        "https://user:pass@maps.apple.com/?q=x",
+        "https://maps.apple.com/search?q=x",
+        "https://maps.apple.com/?q=x#frag",
+    ):
+        with pytest.raises(maps_urls.MapsError):
+            maps_urls.validate_maps_url(bad)
+
+    with pytest.raises(maps_urls.MapsError, match="control"):
+        maps_urls.build_search_url("Cupertino\nSan Francisco")
+    with pytest.raises(maps_urls.MapsError, match="latitude"):
+        maps_urls.build_search_url("x", latitude=91, longitude=0)
+    with pytest.raises(maps_urls.MapsError, match="dirflg"):
+        maps_urls.build_directions_url(daddr="SF", dirflg="fly")
+
+
+def test_maps_open_uses_usr_bin_open_and_frozen_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    frozen = services.prepare_maps_open(query="Cupertino")
+    assert frozen["url"] == "https://maps.apple.com/?q=Cupertino"
+    result = services.exec_maps_open(frozen)
+    assert result["opened"] is True
+    assert calls == [["/usr/bin/open", "https://maps.apple.com/?q=Cupertino"]]
+
+    with pytest.raises(services.ServiceError, match="changed"):
+        services.exec_maps_open({**frozen, "url": "https://maps.apple.com/?q=Evil"})
+    with pytest.raises(services.ServiceError, match="changed"):
+        services.exec_maps_open({**frozen, "url": "maps://?q=Cupertino"})
+    with pytest.raises(services.ServiceError, match="missing mode"):
+        services.exec_maps_open({"url": "maps://?q=Cupertino"})
+    with pytest.raises(services.ServiceError, match="query or daddr"):
+        services.prepare_maps_open()
+
+    pinned = services.prepare_maps_open(
+        query="Cupertino",
+        latitude=37.323,
+        longitude=-122.032,
+    )
+    assert pinned["query"]["ll"] == "37.323,-122.032"
+    assert services.exec_maps_open(pinned)["opened"] is True
+    with pytest.raises(services.ServiceError, match="changed"):
+        services.exec_maps_open({**pinned, "query": {**pinned["query"], "q": "Evil"}})
+
+
+def test_weather_forecast_uses_pinned_hosts_and_mocked_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[str] = []
+
+    class _Resp:
+        def __init__(self, payload: dict) -> None:
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._raw
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    geocode_body = {
+        "results": [
+            {
+                "name": "Berlin",
+                "country": "Germany",
+                "admin1": "Berlin",
+                "latitude": 52.52,
+                "longitude": 13.41,
+                "timezone": "Europe/Berlin",
+            }
+        ]
+    }
+    forecast_body = {
+        "latitude": 52.52,
+        "longitude": 13.41,
+        "timezone": "Europe/Berlin",
+        "current_units": {
+            "temperature_2m": "°C",
+            "weather_code": "wmo code",
+            "wind_speed_10m": "km/h",
+            "precipitation": "mm",
+        },
+        "current": {
+            "time": "2026-03-26T12:00",
+            "temperature_2m": 11.2,
+            "weather_code": 3,
+            "wind_speed_10m": 14.0,
+            "precipitation": 0.0,
+        },
+        "daily_units": {
+            "temperature_2m_max": "°C",
+            "temperature_2m_min": "°C",
+            "precipitation_sum": "mm",
+            "weather_code": "wmo code",
+        },
+        "daily": {
+            "time": ["2026-03-26", "2026-03-27", "2026-03-28"],
+            "weather_code": [3, 61, 0],
+            "temperature_2m_max": [12.0, 9.0, 14.0],
+            "temperature_2m_min": [6.0, 4.0, 5.0],
+            "precipitation_sum": [0.0, 2.5, 0.0],
+        },
+    }
+
+    def fake_open(req: object, timeout: float = 0) -> _Resp:
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        requests.append(url)
+        if "geocoding-api.open-meteo.com" in url:
+            return _Resp(geocode_body)
+        if "api.open-meteo.com" in url:
+            return _Resp(forecast_body)
+        raise AssertionError(f"unexpected host: {url}")
+
+    payload = weather_client.forecast(place="Berlin", opener=fake_open)
+    assert payload["attribution"] == "Weather data by Open-Meteo.com"
+    assert payload["place"]["name"] == "Berlin"
+    assert payload["current"]["condition"] == "Overcast"
+    assert payload["current"]["temperature"] == 11.2
+    assert len(payload["daily"]) == 3
+    assert all("open-meteo.com" in url for url in requests)
+    assert all(url.startswith("https://") for url in requests)
+    assert any("geocoding-api.open-meteo.com" in url for url in requests)
+    assert any("api.open-meteo.com/v1/forecast" in url for url in requests)
+
+    coords = weather_client.forecast(latitude=37.323, longitude=-122.032, opener=fake_open)
+    assert coords["place"]["latitude"] == 37.323
+    assert coords["attribution"] == "Weather data by Open-Meteo.com"
+
+    with pytest.raises(weather_client.WeatherError, match="either place"):
+        weather_client.forecast(place="Berlin", latitude=52.52, longitude=13.41)
+    with pytest.raises(weather_client.WeatherError, match="latitude"):
+        weather_client.forecast(latitude=91, longitude=0)
+    with pytest.raises(weather_client.WeatherError, match="control"):
+        weather_client.forecast(place="Berlin\nhttps://evil.test")
+    with pytest.raises(weather_client.WeatherError, match="days"):
+        weather_client.forecast(latitude=52.52, longitude=13.41, days=99)
+
+    def evil_open(req: object, timeout: float = 0) -> _Resp:
+        raise AssertionError("must not be called")
+
+    with pytest.raises(weather_client.WeatherError, match="non-Open-Meteo"):
+        weather_client._request("https://evil.test/v1/forecast", opener=evil_open)
 
 
 def test_drive_source_change_aborts_before_copy(

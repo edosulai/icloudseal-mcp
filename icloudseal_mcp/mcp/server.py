@@ -1,8 +1,8 @@
 """icloudseal-mcp stdio MCP server.
 
-Exposes iCloud plus local Safari/Music domains (Mail, Contacts, Calendar,
-Messages, Notes, Drive, Photos, Safari, Music) with seal-family two-phase
-mutations:
+Exposes iCloud plus local Safari/Music/Weather/Maps domains (Mail, Contacts,
+Calendar, Messages, Notes, Drive, Photos, Safari, Music, Weather, Maps) with
+seal-family two-phase mutations:
 
   prepare_* → show exact preview → user OK in chat → icloud_request_local_approval
 """
@@ -31,9 +31,12 @@ Before sensitive work:
    → icloud_request_local_approval (Touch ID / macOS password).
 5. On approval timeout or uncertainty: icloud_action_outcome first; never re-prepare a
    duplicate mutate blindly.
-6. Messages/Photos need Full Disk Access. Notes/Safari/Music need Automation. Drive is local CloudDocs.
+6. Messages/Photos need Full Disk Access. Notes/Safari/Music need Automation.
+   Drive is local CloudDocs. Weather uses Open-Meteo (no WeatherKit). Maps
+   search is a local URL; opening Maps.app is gated.
 
-Domains: mail, contacts, calendar, messages, notes, drive, photos, safari, music.
+Domains: mail, contacts, calendar, messages, notes, drive, photos, safari,
+music, weather, maps.
 Never claim a mutation succeeded unless request_local_approval / action_outcome reports success.
 """
 
@@ -48,6 +51,12 @@ READ_ANN = ToolAnnotations(
     destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=False,
+)
+NETWORK_READ_ANN = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 PREPARE_ANN = ToolAnnotations(
     read_only_hint=False,
@@ -100,7 +109,8 @@ def _tool(name: str, description: str, annotations: ToolAnnotations):
 @_tool(
     "icloud_doctor",
     "One-shot diagnosis: credentials, domain readiness "
-    "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos/Safari/Music), and exact next steps. "
+    "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos/Safari/Music/"
+    "Weather/Maps), and exact next steps. "
     "Call first in a new chat.",
     READ_ANN,
 )
@@ -216,6 +226,19 @@ def icloud_list_domains() -> dict[str, Any]:
                 "reads": ["now-playing"],
                 "mutations": ["playpause", "next", "previous"],
                 "requires": "Automation",
+            },
+            {
+                "id": "weather",
+                "transport": "Open-Meteo HTTPS",
+                "reads": ["forecast"],
+                "mutations": [],
+                "requires": "network",
+            },
+            {
+                "id": "maps",
+                "transport": "maps.apple.com URL",
+                "reads": ["search"],
+                "mutations": ["open"],
             },
         ],
         "approval": "prepare_* → user OK → icloud_request_local_approval",
@@ -614,6 +637,56 @@ def icloud_safari_current_tab() -> dict[str, Any]:
 def icloud_music_now_playing() -> dict[str, Any]:
     try:
         return services.music_now_playing()
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+# ---------------------------------------------------------------------------
+# Weather / Maps reads
+# ---------------------------------------------------------------------------
+
+
+@_tool(
+    "icloud_weather_forecast",
+    "Current weather plus a short daily forecast via Open-Meteo. "
+    "Provide either place or latitude+longitude (not both). "
+    "Does not open Weather.app and does not use device location. "
+    "Credit: Weather data by Open-Meteo.com.",
+    NETWORK_READ_ANN,
+)
+def icloud_weather_forecast(
+    place: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    days: int = 3,
+    temperature_unit: str = "celsius",
+) -> dict[str, Any]:
+    try:
+        return services.weather_forecast(
+            place=place,
+            latitude=latitude,
+            longitude=longitude,
+            days=days,
+            temperature_unit=temperature_unit,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_maps_search",
+    "Build a documented https://maps.apple.com search URL. "
+    "Does not open Maps.app and does not geocode. Optional latitude+longitude "
+    "adds an ll pin.",
+    READ_ANN,
+)
+def icloud_maps_search(
+    query: str,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> dict[str, Any]:
+    try:
+        return services.maps_search(query, latitude=latitude, longitude=longitude)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1381,6 +1454,44 @@ def icloud_prepare_music_next() -> dict[str, Any]:
 def icloud_prepare_music_previous() -> dict[str, Any]:
     try:
         return _music_playback_preview("previous")
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_maps_open",
+    "Prepare opening a frozen https://maps.apple.com URL in Maps.app. "
+    "Provide either query (optional lat/lon pin) or daddr directions "
+    "(optional saddr / dirflg d|w|r). Rejects maps:/javascript:/file:/data:.",
+    PREPARE_ANN,
+)
+def icloud_prepare_maps_open(
+    query: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    saddr: str | None = None,
+    daddr: str | None = None,
+    dirflg: str | None = None,
+) -> dict[str, Any]:
+    try:
+        frozen = services.prepare_maps_open(
+            query=query,
+            latitude=latitude,
+            longitude=longitude,
+            saddr=saddr,
+            daddr=daddr,
+            dirflg=dirflg,
+        )
+        preview = (
+            f"Open Maps\nMode: {frozen['mode']}\nURL: {frozen['url']}\n"
+            "Only the frozen https://maps.apple.com URL will be opened."
+        )
+        return approval.prepare_action(
+            action="maps.open",
+            target=f"maps:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

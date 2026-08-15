@@ -19,11 +19,13 @@ from .common import console
 from .contacts import commands as contacts_commands
 from .drive import commands as drive_commands
 from .mail import commands as mail_commands
+from .maps import commands as maps_commands
 from .messages import commands as messages_commands
 from .music import commands as music_commands
 from .notes import commands as notes_commands
 from .photos import commands as photos_commands
 from .safari import commands as safari_commands
+from .weather import commands as weather_commands
 
 DOMAINS = {
     "mail": (
@@ -61,6 +63,14 @@ DOMAINS = {
     "music": (
         "Music.app (AppleScript): now-playing, gated playpause/next/previous.",
         music_commands.register,
+    ),
+    "weather": (
+        "Weather (Open-Meteo): current plus a short daily forecast.",
+        weather_commands.register,
+    ),
+    "maps": (
+        "Apple Maps URL: local search preview, gated open in Maps.app.",
+        maps_commands.register,
     ),
 }
 

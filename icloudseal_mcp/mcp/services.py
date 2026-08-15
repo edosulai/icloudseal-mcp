@@ -26,6 +26,8 @@ from ..drive import commands as drive_commands
 from ..mail import cache, cleanup, jobs
 from ..mail.imap_client import open_session
 from ..mail.smtp_client import SMTPError, freeze_send, send_frozen
+from ..maps import urls as maps_urls
+from ..maps.urls import MapsError
 from ..messages import chatdb
 from ..messages.chatdb import MessagesAccessError
 from ..music import applescript as music_script
@@ -44,6 +46,8 @@ from ..photos import photosdb
 from ..photos.photosdb import PhotosAccessError
 from ..safari import applescript as safari_script
 from ..safari.applescript import SafariError
+from ..weather import client as weather_client
+from ..weather.client import WeatherError
 
 DRIVE_ROOT = drive_commands.DRIVE_ROOT
 MAX_READ_BYTES = drive_commands.MAX_READ_BYTES
@@ -195,6 +199,17 @@ def doctor() -> dict[str, Any]:
             "photos": photos,
             "safari": safari,
             "music": music,
+            "weather": {
+                "ok": True,
+                "transport": "Open-Meteo HTTPS",
+                "ready": True,
+                "needsNetwork": True,
+            },
+            "maps": {
+                "ok": True,
+                "transport": "maps.apple.com URL",
+                "ready": True,
+            },
         },
         "workflow": {
             "firstCall": "icloud_doctor",
@@ -207,7 +222,8 @@ def doctor() -> dict[str, Any]:
         },
         "agentNextSteps": steps
         or [
-            "Call domain read tools (mail/contacts/calendar/messages/notes/drive/photos/safari/music).",
+            "Call domain read tools (mail/contacts/calendar/messages/notes/"
+            "drive/photos/safari/music/weather/maps).",
             "For mutations: prepare_* then request_local_approval after explicit user OK.",
         ],
         "userMessage": (
@@ -263,7 +279,8 @@ def security_audit() -> dict[str, Any]:
     check(
         "no-tcp-listener",
         True,
-        "MCP is stdio-only; domain clients use IMAP/DAV/local DB/AppleScript",
+        "MCP is stdio-only; domain clients use IMAP/DAV/local DB/"
+        "AppleScript/Open-Meteo/maps.apple.com",
     )
     return {
         "ok": all(
@@ -1941,6 +1958,117 @@ def exec_music_previous(payload: dict[str, Any]) -> dict[str, Any]:
     return exec_music_playback({**payload, "action": "previous"})
 
 
+def weather_forecast(
+    *,
+    place: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    days: int = weather_client.DEFAULT_DAYS,
+    temperature_unit: str = "celsius",
+) -> dict[str, Any]:
+    try:
+        return weather_client.forecast(
+            place=place,
+            latitude=latitude,
+            longitude=longitude,
+            days=days,
+            temperature_unit=temperature_unit,
+        )
+    except WeatherError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def maps_search(
+    query: str,
+    *,
+    latitude: float | None = None,
+    longitude: float | None = None,
+) -> dict[str, Any]:
+    try:
+        return maps_urls.build_search_url(
+            query, latitude=latitude, longitude=longitude
+        )
+    except MapsError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def prepare_maps_open(
+    *,
+    query: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    saddr: str | None = None,
+    daddr: str | None = None,
+    dirflg: str | None = None,
+) -> dict[str, Any]:
+    has_query = bool((query or "").strip())
+    has_dest = bool((daddr or "").strip())
+    if has_query == has_dest:
+        raise ServiceError("Provide either query or daddr, not both.")
+    try:
+        if has_query:
+            if saddr or dirflg:
+                raise ServiceError("saddr/dirflg apply only to directions.")
+            built = maps_urls.build_search_url(
+                query or "", latitude=latitude, longitude=longitude
+            )
+        else:
+            if latitude is not None or longitude is not None:
+                raise ServiceError("latitude/longitude apply only to search.")
+            built = maps_urls.build_directions_url(
+                daddr=daddr or "", saddr=saddr, dirflg=dirflg
+            )
+        canonical = maps_urls.validate_maps_url(built["url"])
+    except MapsError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {**built, "url": canonical}
+
+
+def _rebuild_maps_url(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = payload.get("mode")
+    query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    if mode == "search":
+        ll = query.get("ll")
+        latitude = longitude = None
+        if ll:
+            parts = str(ll).split(",")
+            if len(parts) != 2:
+                raise ServiceError("Approved Maps pin is invalid.")
+            try:
+                latitude = float(parts[0])
+                longitude = float(parts[1])
+            except ValueError as exc:
+                raise ServiceError("Approved Maps pin is invalid.") from exc
+        return maps_urls.build_search_url(
+            str(query.get("q") or ""),
+            latitude=latitude,
+            longitude=longitude,
+        )
+    if mode == "directions":
+        return maps_urls.build_directions_url(
+            daddr=str(query.get("daddr") or ""),
+            saddr=query.get("saddr"),
+            dirflg=query.get("dirflg"),
+        )
+    raise ServiceError("Approved Maps payload is missing mode.")
+
+
+def exec_maps_open(payload: dict[str, Any]) -> dict[str, Any]:
+    url = payload.get("url")
+    try:
+        rebuilt = _rebuild_maps_url(payload)
+        canonical = maps_urls.validate_maps_url(rebuilt["url"])
+    except MapsError as exc:
+        raise ServiceError(str(exc)) from exc
+    if canonical != url:
+        raise ServiceError("Approved Maps URL changed; refusing to open.")
+    try:
+        maps_urls.open_maps_url(canonical)
+    except MapsError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"url": canonical, "opened": True}
+
+
 def exec_photos_export(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         dest = export_path(payload["destination"])
@@ -2015,3 +2143,4 @@ def register_all_executors() -> None:
     approval.register_executor("music.playpause", exec_music_playpause)
     approval.register_executor("music.next", exec_music_next)
     approval.register_executor("music.previous", exec_music_previous)
+    approval.register_executor("maps.open", exec_maps_open)

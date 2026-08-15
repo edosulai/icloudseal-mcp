@@ -8,7 +8,7 @@ hands (fetch, list, create, move, delete). Mutations require Touch ID / macOS
 password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
-> **Status — nine domains live (CLI + MCP)**
+> **Status — eleven domains live (CLI + MCP)**
 > - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, send, flags, move, and trash.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
 > - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/update/rm/done.
@@ -18,9 +18,11 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 > - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
 > - **Safari (AppleScript)** — list tabs / current tab plus gated http(s) open.
 > - **Music (AppleScript)** — now-playing plus gated playpause / next / previous.
+> - **Weather (Open-Meteo)** — current plus a short daily forecast (place or lat/lon).
+> - **Maps (maps.apple.com)** — local search URL plus gated open in Maps.app.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~63 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~66 tools).
 
 ## Seal family & security model
 
@@ -28,7 +30,7 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 |---|---|---|
 | `whatseal-mcp` | WhatsApp | Touch ID for every externally visible action |
 | `instaseal-mcp` | Instagram | Touch ID for every externally visible action |
-| **`icloudseal-mcp`** | iCloud + Safari/Music | **CLI `--apply`; MCP prepare → native Touch ID** |
+| **`icloudseal-mcp`** | iCloud + Safari/Music/Weather/Maps | **CLI `--apply`; MCP prepare → native Touch ID** |
 
 Principles:
 - Data stays on this Mac except what enters the active agent/model context.
@@ -89,6 +91,8 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Photos | stats/albums/list + prepare export |
 | Safari | tabs/current + prepare open-url |
 | Music | now-playing + prepare playpause/next/previous |
+| Weather | forecast (Open-Meteo; no Weather.app) |
+| Maps | search URL + prepare open |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
 ## Architecture
@@ -109,10 +113,10 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
         │   mail/ IMAP  contacts/ CardDAV          │
         │   calendar/ CalDAV  messages/ chat.db    │
         │   notes/ AppleScript  drive/ fs  photos/ │
-        │   safari/ Music AppleScript              │
+        │   safari/ music/ weather/ maps/          │
         │   native-approval.swift (Touch ID gate)  │
                    └──────────────────────────────────────────┘
-                     IMAP/SMTP/DAV · local DB · AppleScript · CloudDocs
+                             IMAP/SMTP/DAV · local DB · AppleScript · Open-Meteo
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
@@ -273,6 +277,29 @@ Search / play-by-name is not exposed.
 | `next [--apply]` | Skip to the next track |
 | `previous [--apply]` | Skip to the previous track |
 
+## Weather commands (`icloudseal-mcp weather …`)
+
+Public Open-Meteo forecast. Does **not** open Weather.app and does **not**
+use device location. Provide either `--place` or both `--lat` and `--lon`.
+Results include the required Open-Meteo attribution.
+
+| Command | Action |
+|---|---|
+| `forecast --place <name> [--days 1-7] [--unit celsius\|fahrenheit] [--json]` | Geocode then forecast |
+| `forecast --lat <lat> --lon <lon> [--days] [--unit] [--json]` | Forecast for coordinates |
+
+## Maps commands (`icloudseal-mcp maps …`)
+
+Search builds a documented `https://maps.apple.com/?…` URL locally and does
+**not** open Maps.app. Opening is dry-run unless `--apply`. `maps:` /
+`javascript:` / `file:` / `data:` are rejected.
+
+| Command | Action |
+|---|---|
+| `search --query <text> [--lat --lon] [--json]` | Build a search URL (optional `ll` pin) |
+| `open --query <text> [--lat --lon] [--apply]` | Open the frozen search URL in Maps.app |
+| `open --daddr <dest> [--saddr] [--dirflg d\|w\|r] [--apply]` | Open frozen directions |
+
 ## Safety model
 
 - **Dry-run by default.** Destructive ops require explicit `--apply`.
@@ -301,6 +328,12 @@ Search / play-by-name is not exposed.
 - **Safari URL allowlist.** Open-URL freezes the exact `http`/`https` string
   shown in preview. Missing schemes and `javascript:` / `file:` / `data:` fail
   closed. Page source, `do JavaScript`, and Search the Web are not exposed.
+- **Weather hosts are pinned.** Forecast/geocode only call
+  `api.open-meteo.com` and `geocoding-api.open-meteo.com` over HTTPS. User
+  input is a place name or coordinates, never a URL. Redirects are refused.
+- **Maps URL allowlist.** Search is local `urlencode` only. Open freezes
+  `https://maps.apple.com/?…` and launches it with `/usr/bin/open`. `maps:`
+  and undocumented guide schemes are not exposed.
 - **Private local state.** State/backup/export directories use mode `0700` and
   sensitive files use `0600`; approval outcomes are atomically replaced.
 - **One credential, least surprise.** Same Keychain item authenticates IMAP,
@@ -340,6 +373,8 @@ Three tiers, by how macOS exposes each service:
 | Photos | local `Photos.sqlite` catalog (read) | **Full Disk Access** |
 | Safari | AppleScript (Safari) | Automation |
 | Music | AppleScript (Music.app) | Automation |
+| Weather | Open-Meteo HTTPS | network |
+| Maps | `https://maps.apple.com` URL | `/usr/bin/open` (gated) |
 
 ## Roadmap
 
@@ -347,8 +382,6 @@ Three tiers, by how macOS exposes each service:
   Album edits / imports would need PhotoKit (`osxphotos`) or Photos.app
   automation; deferred because automation blocks on TCC and originals are
   iCloud-offloaded.
-- **Weather / Maps** — public weather API + Apple Maps URL open/search. No
-  WeatherKit/MapKit entitlements.
 - **Health** — blocked without a signed native helper + HealthKit entitlements.
   Will not scrape Health.app.
 - **Scheduled cleanup** — optional LaunchAgent for recurring `mail cleanup strict`.

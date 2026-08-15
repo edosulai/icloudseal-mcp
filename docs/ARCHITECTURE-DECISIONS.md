@@ -24,10 +24,10 @@ actions without explicit local approval.
 |---|---|---|
 | Metadata / health | `icloud_doctor`, folder counts, domain list | free |
 | Sensitive read | SMS/iMessage bodies, email bodies, full contacts, notes | free over MCP (content enters agent context); FDA/Automation OS gates apply |
-| Externally visible / mutate | send mail, flag/move/trash mail, send iMessage, create/update/delete contacts, calendar write, notes update, drive rm, mail apply | **prepare preview → explicit chat OK → Touch ID / macOS password** |
+| Externally visible / mutate | send mail, flag/move/trash mail, send iMessage, create/update/delete contacts, calendar write, notes update, drive rm, mail apply, Safari open-url, Music playback | **prepare preview → explicit chat OK → Touch ID / macOS password** |
 
 - CLI: dry-run plans + `--apply`.
-- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~56 tools).  
+- MCP: `mcp-wrapper.sh` → `icloudseal_mcp.mcp.server` (~63 tools).  
   Draft store TTL 10 minutes, single-use; helper `native-approval.swift` compiled to
   `~/Library/Application Support/icloudseal-mcp/bin/native-approval` (mode `0500`).
 - MCP SDK is pinned to the supported major range `mcp>=2,<3`; tool failures use
@@ -52,6 +52,10 @@ Prepare resolves every mutable selector before native approval:
   content/tree hashes; overwrite must be explicit.
 - Photos: exact asset UUID/catalog path and downloaded-original hash. Exports
   use UUID-prefixed filenames and a new destination directory.
+- Safari: exact `http`/`https` URL plus `new_tab`/`new_window`. No implicit
+  scheme prefix. Page source and JavaScript are not frozen or executed.
+- Music: playback action plus a now-playing snapshot for the Touch ID preview.
+  Scripts are constant (`playpause` / `next track` / `previous track`).
 
 Query strings, mutable plan-file references, and post-approval re-searches are
 not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
@@ -62,8 +66,9 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
 - MCP exports: `~/Library/Application Support/icloudseal-mcp/exports/` only.
 - Existing outputs are not overwritten implicitly; Photos export destinations
   must be new and Drive overwrite requires explicit approval.
-- Notes, Messages, and Finder AppleScript receive untrusted values through
-  `argv`; no dynamic value is interpolated into AppleScript source.
+- Notes, Messages, Finder, and Safari AppleScript receive untrusted values
+  through `argv`; no dynamic value is interpolated into AppleScript source.
+  Music playback scripts take no arguments.
 
 ## Domains (live CLI + MCP)
 
@@ -74,8 +79,11 @@ not executor inputs. ETag/UIDVALIDITY/hash mismatches fail closed.
 5. Notes — AppleScript
 6. iCloud Drive — filesystem under CloudDocs
 7. Photos — `Photos.sqlite` read + best-effort export
+8. Safari — AppleScript tabs/current + gated http(s) open
+9. Music — AppleScript now-playing + gated playpause/next/previous
 
 **Not supported:** WhatsApp (use `whatseal-mcp`). Instagram (use `instaseal-mcp`).
+HealthKit (needs a signed native helper). WeatherKit / MapKit entitlements.
 
 ## Credential / storage identity
 

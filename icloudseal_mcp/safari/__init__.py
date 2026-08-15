@@ -1,0 +1,1 @@
+"""Safari local automation (AppleScript)."""

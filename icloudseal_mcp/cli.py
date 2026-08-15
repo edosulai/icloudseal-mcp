@@ -20,8 +20,10 @@ from .contacts import commands as contacts_commands
 from .drive import commands as drive_commands
 from .mail import commands as mail_commands
 from .messages import commands as messages_commands
+from .music import commands as music_commands
 from .notes import commands as notes_commands
 from .photos import commands as photos_commands
+from .safari import commands as safari_commands
 
 DOMAINS = {
     "mail": (
@@ -51,6 +53,14 @@ DOMAINS = {
     "photos": (
         "iCloud Photos: read-only stats/albums/list + best-effort export.",
         photos_commands.register,
+    ),
+    "safari": (
+        "Safari (AppleScript): list tabs, gated http(s) open.",
+        safari_commands.register,
+    ),
+    "music": (
+        "Music.app (AppleScript): now-playing, gated playpause/next/previous.",
+        music_commands.register,
     ),
 }
 

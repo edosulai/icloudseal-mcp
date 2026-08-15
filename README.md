@@ -8,7 +8,7 @@ hands (fetch, list, create, move, delete). Mutations require Touch ID / macOS
 password via the same two-phase prepare → native approval pattern as the other
 seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
-> **Status — seven domains live (CLI + MCP)**
+> **Status — nine domains live (CLI + MCP)**
 > - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, job leads, send, flags, move, and trash.
 > - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
 > - **Calendar + Reminders (CalDAV)** — list calendars/events/reminders plus gated add/update/rm/done.
@@ -16,9 +16,11 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 > - **Notes (AppleScript)** — list/search/read plus gated create/update/delete.
 > - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated put/rm (rm → Trash).
 > - **Photos** — read-only stats/albums/list (reads `Photos.sqlite`) plus best-effort export.
+> - **Safari (AppleScript)** — list tabs / current tab plus gated http(s) open.
+> - **Music (AppleScript)** — now-playing plus gated playpause / next / previous.
 >
 > CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~56 tools).
+> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (~63 tools).
 
 ## Seal family & security model
 
@@ -26,7 +28,7 @@ seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-
 |---|---|---|
 | `whatseal-mcp` | WhatsApp | Touch ID for every externally visible action |
 | `instaseal-mcp` | Instagram | Touch ID for every externally visible action |
-| **`icloudseal-mcp`** | iCloud (Mail/Contacts/Calendar/Messages/Notes/Drive/Photos) | **CLI `--apply`; MCP prepare → native Touch ID** |
+| **`icloudseal-mcp`** | iCloud + Safari/Music | **CLI `--apply`; MCP prepare → native Touch ID** |
 
 Principles:
 - Data stays on this Mac except what enters the active agent/model context.
@@ -85,6 +87,8 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
 | Notes | list/search/read + prepare create/update/delete |
 | Drive | ls/tree/find/read + prepare put/rm |
 | Photos | stats/albums/list + prepare export |
+| Safari | tabs/current + prepare open-url |
+| Music | now-playing + prepare playpause/next/previous |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
 ## Architecture
@@ -105,9 +109,10 @@ The wrapper self-bootstraps `.venv` + editable install if needed, then runs
         │   mail/ IMAP  contacts/ CardDAV          │
         │   calendar/ CalDAV  messages/ chat.db    │
         │   notes/ AppleScript  drive/ fs  photos/ │
+        │   safari/ Music AppleScript              │
         │   native-approval.swift (Touch ID gate)  │
-           └──────────────────────────────────────────┘
-             IMAP/SMTP/DAV · local DB · AppleScript · CloudDocs
+                   └──────────────────────────────────────────┘
+                     IMAP/SMTP/DAV · local DB · AppleScript · CloudDocs
 ```
 
 **One credential for everything.** The same iCloud app-specific password in the
@@ -244,6 +249,30 @@ downloaded and reports the rest.
 | `list [--album … --kind photo\|video --favorites --limit] [--json]` | List assets (newest first) |
 | `export <dir> [--album --kind --favorites] [--apply]` | Copy locally-downloaded originals out |
 
+## Safari commands (`icloudseal-mcp safari …`)
+
+Reads do **not** launch Safari. Opening a URL needs Automation access and `--apply`.
+Only `http` / `https` URLs are accepted — no implicit `https://` prefix, no
+`javascript:` / `file:` / `data:`.
+
+| Command | Action |
+|---|---|
+| `tabs [--json]` | List open tabs (empty if Safari is not running) |
+| `current [--json]` | Show the current tab (name + URL; no page source) |
+| `open --url <http(s)> [--window] [--apply]` | Open the frozen URL in a new tab or window |
+
+## Music commands (`icloudseal-mcp music …`)
+
+Reads do **not** launch Music.app. Playback is dry-run unless `--apply`.
+Search / play-by-name is not exposed.
+
+| Command | Action |
+|---|---|
+| `now [--json]` | Now-playing (state/name/artist/album); `stopped` if Music is not running |
+| `playpause [--apply]` | Toggle play/pause |
+| `next [--apply]` | Skip to the next track |
+| `previous [--apply]` | Skip to the previous track |
+
 ## Safety model
 
 - **Dry-run by default.** Destructive ops require explicit `--apply`.
@@ -266,8 +295,12 @@ downloaded and reports the rest.
   is jailed to `plans/`; Contacts/Messages/Mail/Photos exports are jailed to
   `exports/`. Drive overwrite requires `overwrite=true` and an unchanged
   approved destination.
-- **No AppleScript interpolation.** Notes, Messages, and Finder receive dynamic
-  values through AppleScript `argv`, never executable script source.
+- **No AppleScript interpolation.** Notes, Messages, Finder, and Safari receive
+  dynamic values through AppleScript `argv`, never executable script source.
+  Music playback scripts are constant (no user values at all).
+- **Safari URL allowlist.** Open-URL freezes the exact `http`/`https` string
+  shown in preview. Missing schemes and `javascript:` / `file:` / `data:` fail
+  closed. Page source, `do JavaScript`, and Search the Web are not exposed.
 - **Private local state.** State/backup/export directories use mode `0700` and
   sensitive files use `0600`; approval outcomes are atomically replaced.
 - **One credential, least surprise.** Same Keychain item authenticates IMAP,
@@ -305,6 +338,8 @@ Three tiers, by how macOS exposes each service:
 | Notes | AppleScript (Notes.app) | Automation |
 | iCloud Drive | filesystem `~/Library/Mobile Documents/com~apple~CloudDocs/` | — |
 | Photos | local `Photos.sqlite` catalog (read) | **Full Disk Access** |
+| Safari | AppleScript (Safari) | Automation |
+| Music | AppleScript (Music.app) | Automation |
 
 ## Roadmap
 
@@ -312,6 +347,10 @@ Three tiers, by how macOS exposes each service:
   Album edits / imports would need PhotoKit (`osxphotos`) or Photos.app
   automation; deferred because automation blocks on TCC and originals are
   iCloud-offloaded.
+- **Weather / Maps** — public weather API + Apple Maps URL open/search. No
+  WeatherKit/MapKit entitlements.
+- **Health** — blocked without a signed native helper + HealthKit entitlements.
+  Will not scrape Health.app.
 - **Scheduled cleanup** — optional LaunchAgent for recurring `mail cleanup strict`.
 
 ## Why not a unified iCloud API?

@@ -1,7 +1,8 @@
 """icloudseal-mcp stdio MCP server.
 
-Exposes all iCloud domains (Mail, Contacts, Calendar, Messages, Notes, Drive,
-Photos) with seal-family two-phase mutations:
+Exposes iCloud plus local Safari/Music domains (Mail, Contacts, Calendar,
+Messages, Notes, Drive, Photos, Safari, Music) with seal-family two-phase
+mutations:
 
   prepare_* → show exact preview → user OK in chat → icloud_request_local_approval
 """
@@ -30,9 +31,9 @@ Before sensitive work:
    → icloud_request_local_approval (Touch ID / macOS password).
 5. On approval timeout or uncertainty: icloud_action_outcome first; never re-prepare a
    duplicate mutate blindly.
-6. Messages/Photos need Full Disk Access. Notes need Automation. Drive is local CloudDocs.
+6. Messages/Photos need Full Disk Access. Notes/Safari/Music need Automation. Drive is local CloudDocs.
 
-Domains: mail, contacts, calendar, messages, notes, drive, photos.
+Domains: mail, contacts, calendar, messages, notes, drive, photos, safari, music.
 Never claim a mutation succeeded unless request_local_approval / action_outcome reports success.
 """
 
@@ -99,7 +100,7 @@ def _tool(name: str, description: str, annotations: ToolAnnotations):
 @_tool(
     "icloud_doctor",
     "One-shot diagnosis: credentials, domain readiness "
-    "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos), and exact next steps. "
+    "(Mail/Contacts/Calendar/Messages/Notes/Drive/Photos/Safari/Music), and exact next steps. "
     "Call first in a new chat.",
     READ_ANN,
 )
@@ -201,6 +202,20 @@ def icloud_list_domains() -> dict[str, Any]:
                 "reads": ["stats", "albums", "list"],
                 "mutations": ["export local originals"],
                 "requires": "Full Disk Access",
+            },
+            {
+                "id": "safari",
+                "transport": "AppleScript Safari",
+                "reads": ["tabs", "current"],
+                "mutations": ["open-url"],
+                "requires": "Automation",
+            },
+            {
+                "id": "music",
+                "transport": "AppleScript Music.app",
+                "reads": ["now-playing"],
+                "mutations": ["playpause", "next", "previous"],
+                "requires": "Automation",
             },
         ],
         "approval": "prepare_* → user OK → icloud_request_local_approval",
@@ -548,6 +563,57 @@ def icloud_photos_list(
             album=album, kind=kind, favorites=favorites, limit=limit
         )
         return {"count": len(assets), "assets": assets}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+# ---------------------------------------------------------------------------
+# Safari reads
+# ---------------------------------------------------------------------------
+
+
+@_tool(
+    "icloud_safari_list_tabs",
+    "List open Safari tabs (window/tab index, name, URL, current). "
+    "Does not launch Safari; empty list if Safari is not running. "
+    "Does not return page source or text.",
+    READ_ANN,
+)
+def icloud_safari_list_tabs() -> dict[str, Any]:
+    try:
+        tabs = services.safari_list_tabs()
+        return {"count": len(tabs), "tabs": tabs}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_safari_current_tab",
+    "Show the current Safari tab (name, URL, indices). "
+    "Does not launch Safari and does not return page source.",
+    READ_ANN,
+)
+def icloud_safari_current_tab() -> dict[str, Any]:
+    try:
+        return services.safari_current_tab()
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+# ---------------------------------------------------------------------------
+# Music reads
+# ---------------------------------------------------------------------------
+
+
+@_tool(
+    "icloud_music_now_playing",
+    "Show Music.app now-playing (state, name, artist, album, duration, position). "
+    "Does not launch Music; returns state=stopped if Music is not running.",
+    READ_ANN,
+)
+def icloud_music_now_playing() -> dict[str, Any]:
+    try:
+        return services.music_now_playing()
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1235,6 +1301,86 @@ def icloud_prepare_photos_export(
             preview=preview,
             payload=frozen,
         )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_safari_open_url",
+    "Prepare opening an http(s) URL in Safari (new tab or new window). "
+    "Rejects javascript:/file:/data: and URLs without an explicit scheme.",
+    PREPARE_ANN,
+)
+def icloud_prepare_safari_open_url(url: str, target: str = "new_tab") -> dict[str, Any]:
+    try:
+        frozen = services.prepare_safari_open_url(url, target=target)
+        preview = (
+            f"Open URL in Safari\nURL: {frozen['url']}\n"
+            f"Target: {frozen['target']}\n"
+            "Only the frozen http(s) URL will be opened."
+        )
+        return approval.prepare_action(
+            action="safari.open_url",
+            target=f"safari:{frozen['url']}",
+            preview=preview,
+            payload=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+def _music_playback_preview(action: str) -> dict[str, Any]:
+    frozen = services.prepare_music_playback(action)
+    now = frozen["nowPlaying"]
+    now_line = now.get("name") or now.get("state") or "stopped"
+    artist = now.get("artist")
+    if artist:
+        now_line = f"{now_line} — {artist}"
+    preview = (
+        f"Music {action}\nNow playing: {now_line}\n"
+        f"State: {now.get('state')}\n"
+        "Executes the constant Music.app command after Touch ID."
+    )
+    return approval.prepare_action(
+        action=f"music.{action}",
+        target=f"music:{action}",
+        preview=preview,
+        payload=frozen,
+    )
+
+
+@_tool(
+    "icloud_prepare_music_playpause",
+    "Prepare toggling Music.app play/pause. Preview snapshots now-playing.",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_playpause() -> dict[str, Any]:
+    try:
+        return _music_playback_preview("playpause")
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_next",
+    "Prepare skipping to the next Music.app track. Preview snapshots now-playing.",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_next() -> dict[str, Any]:
+    try:
+        return _music_playback_preview("next")
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@_tool(
+    "icloud_prepare_music_previous",
+    "Prepare skipping to the previous Music.app track. Preview snapshots now-playing.",
+    PREPARE_ANN,
+)
+def icloud_prepare_music_previous() -> dict[str, Any]:
+    try:
+        return _music_playback_preview("previous")
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

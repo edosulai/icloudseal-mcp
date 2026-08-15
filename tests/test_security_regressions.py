@@ -20,8 +20,10 @@ from icloudseal_mcp.calendar.caldav import complete_reminder, update_event, upda
 from icloudseal_mcp.contacts.carddav import parse_vcard, update_vcard
 from icloudseal_mcp.mail.smtp_client import SMTPError, freeze_send, send_frozen
 from icloudseal_mcp.mcp import approval, services
+from icloudseal_mcp.music import applescript as music_script
 from icloudseal_mcp.notes import applescript
 from icloudseal_mcp.paths import managed_path
+from icloudseal_mcp.safari import applescript as safari_script
 
 
 def test_outcome_ids_cannot_escape_and_files_are_private(
@@ -134,6 +136,82 @@ def test_notes_values_are_passed_via_argv(monkeypatch: pytest.MonkeyPatch) -> No
         assert malicious not in script
         assert "--" in command
     assert malicious in calls[0][4:]
+
+
+def test_safari_url_rejects_unsafe_schemes() -> None:
+    assert safari_script.validate_url("https://example.com/path") == "https://example.com/path"
+    assert safari_script.validate_url("http://example.com") == "http://example.com"
+    for bad in (
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "data:text/html,hi",
+        "example.com",
+        "https://",
+        "ftp://example.com",
+        "https://example.com/\nhttps://evil.test",
+    ):
+        with pytest.raises(safari_script.SafariError):
+            safari_script.validate_url(bad)
+
+
+def test_safari_open_url_values_are_passed_via_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    malicious = 'https://example.com/" & do shell script "touch /tmp/pwned" & "'
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    safari_script.open_url(malicious, target="new_tab")
+
+    assert len(calls) == 1
+    command = calls[0]
+    script = command[2]
+    assert malicious not in script
+    assert "--" in command
+    assert malicious in command[4:]
+    assert "tab" in command[4:]
+
+
+def test_music_playback_scripts_have_no_user_interpolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> SimpleNamespace:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    music_script.playback("playpause")
+    music_script.playback("next")
+    music_script.playback("previous")
+
+    assert len(calls) == 3
+    for command, expected in zip(
+        calls,
+        (
+            music_script.PLAYBACK_SCRIPTS["playpause"],
+            music_script.PLAYBACK_SCRIPTS["next"],
+            music_script.PLAYBACK_SCRIPTS["previous"],
+        ),
+        strict=True,
+    ):
+        assert command[2] == expected
+        assert command[3:] == ["--"]
+    with pytest.raises(music_script.MusicError):
+        music_script.playback("search")
+
+
+def test_prepare_safari_open_url_freezes_canonical_url() -> None:
+    frozen = services.prepare_safari_open_url(
+        "  https://example.com/docs  ",
+        target="new_window",
+    )
+    assert frozen == {"url": "https://example.com/docs", "target": "new_window"}
+    with pytest.raises(services.ServiceError, match="http or https"):
+        services.prepare_safari_open_url("javascript:alert(1)")
 
 
 def test_drive_source_change_aborts_before_copy(

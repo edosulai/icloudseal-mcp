@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icloudseal-mcp"
-version = "0.5.0"
-description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos with gated mutations and Touch ID approval."
+version = "0.6.0"
+description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos, Safari, Music with gated mutations and Touch ID approval."
 requires-python = ">=3.11"
 authors = [{ name = "Edo Sulai" }]
 license = { text = "MIT" }

@@ -28,6 +28,8 @@ from ..mail.imap_client import open_session
 from ..mail.smtp_client import SMTPError, freeze_send, send_frozen
 from ..messages import chatdb
 from ..messages.chatdb import MessagesAccessError
+from ..music import applescript as music_script
+from ..music.applescript import MusicError
 from ..notes import applescript
 from ..notes.applescript import NotesError
 from ..paths import (
@@ -40,6 +42,8 @@ from ..paths import (
 )
 from ..photos import photosdb
 from ..photos.photosdb import PhotosAccessError
+from ..safari import applescript as safari_script
+from ..safari.applescript import SafariError
 
 DRIVE_ROOT = drive_commands.DRIVE_ROOT
 MAX_READ_BYTES = drive_commands.MAX_READ_BYTES
@@ -144,6 +148,8 @@ def doctor() -> dict[str, Any]:
     messages = _probe_messages()
     notes = _probe_notes()
     photos = _probe_photos()
+    safari = _probe_safari()
+    music = _probe_music()
     drive = {
         "root": str(DRIVE_ROOT),
         "exists": DRIVE_ROOT.exists(),
@@ -168,6 +174,10 @@ def doctor() -> dict[str, Any]:
         steps.append("Grant Full Disk Access for Photos.sqlite if photo tools are needed.")
     if notes.get("ok") is False:
         steps.append("Grant Automation access for Notes.app if note tools are needed.")
+    if safari.get("ok") is False:
+        steps.append("Grant Automation access for Safari if Safari tools are needed.")
+    if music.get("ok") is False:
+        steps.append("Grant Automation access for Music.app if Music tools are needed.")
 
     return {
         "ok": ready,
@@ -183,6 +193,8 @@ def doctor() -> dict[str, Any]:
             "notes": notes,
             "drive": drive,
             "photos": photos,
+            "safari": safari,
+            "music": music,
         },
         "workflow": {
             "firstCall": "icloud_doctor",
@@ -195,7 +207,7 @@ def doctor() -> dict[str, Any]:
         },
         "agentNextSteps": steps
         or [
-            "Call domain read tools (mail/contacts/calendar/messages/notes/drive/photos).",
+            "Call domain read tools (mail/contacts/calendar/messages/notes/drive/photos/safari/music).",
             "For mutations: prepare_* then request_local_approval after explicit user OK.",
         ],
         "userMessage": (
@@ -291,6 +303,36 @@ def _probe_photos() -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "needsFullDiskAccess": True}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
+
+
+def _probe_safari() -> dict[str, Any]:
+    try:
+        running = safari_script.safari_is_running()
+        return {
+            "ok": True,
+            "running": running,
+            "transport": "AppleScript",
+            "needsAutomation": True,
+        }
+    except SafariError as exc:
+        return {"ok": False, "error": str(exc), "needsAutomation": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "needsAutomation": True}
+
+
+def _probe_music() -> dict[str, Any]:
+    try:
+        running = music_script.music_is_running()
+        return {
+            "ok": True,
+            "running": running,
+            "transport": "AppleScript",
+            "needsAutomation": True,
+        }
+    except MusicError as exc:
+        return {"ok": False, "error": str(exc), "needsAutomation": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "needsAutomation": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1800,6 +1842,105 @@ def prepare_photos_export(
     }
 
 
+def safari_list_tabs() -> list[dict[str, Any]]:
+    try:
+        tabs = safari_script.list_tabs()
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return [
+        {
+            "window_index": tab.window_index,
+            "tab_index": tab.tab_index,
+            "name": tab.name,
+            "url": tab.url,
+            "is_current": tab.is_current,
+        }
+        for tab in tabs
+    ]
+
+
+def safari_current_tab() -> dict[str, Any]:
+    try:
+        tab = safari_script.current_tab()
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if tab is None:
+        return {"running": False}
+    return {
+        "running": True,
+        "window_index": tab.window_index,
+        "tab_index": tab.tab_index,
+        "name": tab.name,
+        "url": tab.url,
+        "is_current": True,
+    }
+
+
+def prepare_safari_open_url(url: str, *, target: str = "new_tab") -> dict[str, Any]:
+    try:
+        canonical = safari_script.validate_url(url)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if target not in safari_script.ALLOWED_TARGETS:
+        raise ServiceError("target must be new_tab or new_window.")
+    return {"url": canonical, "target": target}
+
+
+def exec_safari_open_url(payload: dict[str, Any]) -> dict[str, Any]:
+    url = payload.get("url")
+    target = payload.get("target", "new_tab")
+    try:
+        canonical = safari_script.validate_url(str(url or ""))
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    if canonical != url:
+        raise ServiceError("Approved Safari URL changed; refusing to open.")
+    if target not in safari_script.ALLOWED_TARGETS:
+        raise ServiceError("target must be new_tab or new_window.")
+    try:
+        safari_script.open_url(canonical, target=target)
+    except SafariError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"url": canonical, "target": target, "opened": True}
+
+
+def music_now_playing() -> dict[str, Any]:
+    try:
+        return music_script.now_playing().to_dict()
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+
+
+def prepare_music_playback(action: str) -> dict[str, Any]:
+    if action not in music_script.ALLOWED_PLAYBACK:
+        raise ServiceError("playback action must be playpause, next, or previous.")
+    now = music_now_playing()
+    return {"action": action, "nowPlaying": now}
+
+
+def exec_music_playback(payload: dict[str, Any]) -> dict[str, Any]:
+    action = payload.get("action")
+    if action not in music_script.ALLOWED_PLAYBACK:
+        raise ServiceError("playback action must be playpause, next, or previous.")
+    try:
+        music_script.playback(action)
+    except MusicError as exc:
+        raise ServiceError(str(exc)) from exc
+    return {"action": action, "ok": True}
+
+
+def exec_music_playpause(payload: dict[str, Any]) -> dict[str, Any]:
+    return exec_music_playback({**payload, "action": "playpause"})
+
+
+def exec_music_next(payload: dict[str, Any]) -> dict[str, Any]:
+    return exec_music_playback({**payload, "action": "next"})
+
+
+def exec_music_previous(payload: dict[str, Any]) -> dict[str, Any]:
+    return exec_music_playback({**payload, "action": "previous"})
+
+
 def exec_photos_export(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         dest = export_path(payload["destination"])
@@ -1870,3 +2011,7 @@ def register_all_executors() -> None:
     approval.register_executor("drive.put", exec_drive_put)
     approval.register_executor("drive.rm", exec_drive_rm)
     approval.register_executor("photos.export", exec_photos_export)
+    approval.register_executor("safari.open_url", exec_safari_open_url)
+    approval.register_executor("music.playpause", exec_music_playpause)
+    approval.register_executor("music.next", exec_music_next)
+    approval.register_executor("music.previous", exec_music_previous)

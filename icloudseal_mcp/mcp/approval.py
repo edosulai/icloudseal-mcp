@@ -21,14 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from ..paths import APP_DIR, ensure_app_dir
+from ..skill_install import packaged_helper_source
 
 APPROVALS_DIR = APP_DIR / "approvals"
 OUTCOMES_DIR = APPROVALS_DIR / "outcomes"
 DEFAULT_TTL_MS = 10 * 60 * 1000
 DEFAULT_MAXIMUM = 100
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_HELPER_SOURCE = PROJECT_ROOT / "native-approval.swift"
+DEFAULT_HELPER_SOURCE = packaged_helper_source()
 DEFAULT_HELPER_BIN = Path(
     os.environ.get(
         "ICLOUDSEAL_APPROVAL_HELPER",

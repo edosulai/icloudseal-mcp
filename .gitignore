@@ -30,8 +30,8 @@ session.json
 # Local overlays — copy from *.example
 scripts/contact_name_rules.json
 
-# Local data (NEVER commit)
-data/
+# Local data at repo root (NEVER commit). Package data lives in icloudseal_mcp/data/.
+/data/
 backups/
 exports/
 plans/

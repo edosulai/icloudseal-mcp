@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 160" role="img" aria-label="Read freely, prepare a draft, approve with Touch ID, then mutate">
+  <rect width="920" height="160" rx="16" fill="#0B1220"/>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <rect x="24" y="36" width="190" height="88" rx="12" fill="#082F49"/>
+    <text x="119" y="76" text-anchor="middle" fill="#7DD3FC" font-size="15" font-weight="600">1. Read</text>
+    <text x="119" y="98" text-anchor="middle" fill="#BAE6FD" font-size="12">free · no Touch ID</text>
+    <rect x="251" y="36" width="190" height="88" rx="12" fill="#082F49"/>
+    <text x="346" y="76" text-anchor="middle" fill="#7DD3FC" font-size="15" font-weight="600">2. Prepare</text>
+    <text x="346" y="98" text-anchor="middle" fill="#BAE6FD" font-size="12">immutable preview</text>
+    <rect x="478" y="36" width="190" height="88" rx="12" fill="#0C4A6E"/>
+    <text x="573" y="76" text-anchor="middle" fill="#F0F9FF" font-size="15" font-weight="600">3. Touch ID</text>
+    <text x="573" y="98" text-anchor="middle" fill="#BAE6FD" font-size="12">exact target only</text>
+    <rect x="705" y="36" width="190" height="88" rx="12" fill="#0369A1"/>
+    <text x="800" y="76" text-anchor="middle" fill="#F0F9FF" font-size="15" font-weight="600">4. Mutate</text>
+    <text x="800" y="98" text-anchor="middle" fill="#E0F2FE" font-size="12">single-use draft</text>
+  </g>
+</svg>

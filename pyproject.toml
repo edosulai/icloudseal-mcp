@@ -4,17 +4,36 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icloudseal-mcp"
-version = "0.8.4"
+version = "0.9.0"
 description = "Sealed iCloud MCP/CLI — local Mail, Contacts, Calendar, Messages, Notes, Drive, Photos, Safari, Music, Weather, Maps, Health, ops, and Shortcuts with gated mutations and Touch ID approval."
+readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Edo Sulai" }]
-license = { text = "MIT" }
+authors = [{ name = "Edo Sulaiman" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["icloud", "mcp", "mail", "calendar", "contacts", "macos", "touch-id"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+]
 dependencies = [
     "rich>=13.7",
     "requests>=2.31",
     "mcp>=2.0,<3",
     "anyio>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/edosulai/icloudseal-mcp"
+Repository = "https://github.com/edosulai/icloudseal-mcp"
+Issues = "https://github.com/edosulai/icloudseal-mcp/issues"
 
 [project.optional-dependencies]
 mcp = [
@@ -24,6 +43,8 @@ mcp = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "build>=1.2",
+    "twine>=5.0",
 ]
 
 [project.scripts]
@@ -31,9 +52,19 @@ icloudseal-mcp = "icloudseal_mcp.cli:main"
 mail-agent = "icloudseal_mcp.cli:mail_main"
 icloudseal-mcp-server = "icloudseal_mcp.mcp.server:main"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["icloudseal_mcp*"]
+
+[tool.setuptools.package-data]
+icloudseal_mcp = [
+    "data/native-approval.swift",
+    "data/skills/icloudseal/SKILL.md",
+    "data/skills/icloudseal/references/*.md",
+]
 
 [tool.ruff]
 line-length = 100

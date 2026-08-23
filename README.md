@@ -1,65 +1,95 @@
-# icloudseal-mcp
+<p align="center">
+  <img src="docs/assets/icloudseal-mark.svg" width="88" height="88" alt="icloudseal mark">
+</p>
 
-**Sealed iCloud MCP** — local CLI + stdio MCP for AI agents. Part of the seal
-family with `whatseal-mcp` (WhatsApp) and `instaseal-mcp` (Instagram).
+<h1 align="center">icloudseal</h1>
 
-The agent does the thinking (classify, summarize, decide); this tool does the
-hands (fetch, list, create, move, delete). Mutations require Touch ID / macOS
-password via the same two-phase prepare → native approval pattern as the other
-seal tools. Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
+<p align="center">
+  <strong>Sealed iCloud MCP.</strong> Local CLI + stdio for AI agents.<br>
+  Reads are free. Every send, create, delete, or open waits for Touch ID.
+</p>
 
-> **Status — fourteen domains live (CLI + MCP)**
-> - **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), forward, flags, move, trash, and create-folder.
-> - **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
-> - **Calendar + Reminders (CalDAV)** — list/timezones plus gated add/update/rm/done with ATTENDEE PARTSTAT, reminder PRIORITY, TZID, and validated RRULE/VALARM.
-> - **Messages / SMS** — read `chat.db` plus gated AppleScript send (optional file attach).
-> - **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create (account picker)/update/delete.
-> - **iCloud Drive (filesystem)** — ls/tree/find/read plus gated mkdir/put/rm/rename/move/copy (rm → Trash).
-> - **Photos** — stats/albums/list plus gated export, favorite, album-add/create/remove/delete. Import is not implemented.
-> - **Safari (AppleScript + FDA store)** — tabs/current/page-text/extract plus bookmarks/history reads. Gated http(s) open, search, close-tab, bookmarks-bar add/rm, and Reading List add/rm.
-> - **Music (AppleScript)** — now-playing plus library/playlist search (names only). Gated playpause/next/previous, volume, shuffle, repeat, play-by-name, playlist-play.
-> - **Weather (Open-Meteo)** — current plus daily forecast; hourly and 15-minute rows are opt-in.
-> - **Maps (maps.apple.com)** — local search/directions URL plus gated open (optional zoom/type).
-> - **Health** — status only. Fail-closed until a signed HealthKit helper exists. Does not scrape Health.app.
-> - **Ops** — write a mail-cleanup LaunchAgent plist. Does not `launchctl load`.
-> - **Shortcuts** — list installed shortcuts plus gated run by exact name (optional frozen text input).
->
-> CLI: mutating commands are dry-run by default and require `--apply`.
-> MCP: mutating tools are `icloud_prepare_*` then `icloud_request_local_approval` (103 tools).
-> Bundled skill: `icloudseal-mcp install-skill` (Copilot by default; `mcp-wrapper.sh` auto-installs).
+<p align="center">
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-Touch%20ID-111?logo=apple&amp;logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/python-%3E%3D3.11-3776ab?logo=python&amp;logoColor=white">
+  <img alt="PyPI" src="https://img.shields.io/pypi/v/icloudseal-mcp">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-0d9488">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-1f2328">
+</p>
 
-## Seal family & security model
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#mcp-setup">MCP setup</a> ·
+  <a href="#domains">Domains</a> ·
+  <a href="#safety-model">Security</a>
+</p>
 
-| Project | Domain | Approval |
-|---|---|---|
-| `whatseal-mcp` | WhatsApp | Touch ID for every externally visible action |
-| `instaseal-mcp` | Instagram | Touch ID for every externally visible action |
-| **`icloudseal-mcp`** | iCloud + Safari/Music/Weather/Maps/Shortcuts | **CLI `--apply`; MCP prepare → native Touch ID** |
+<p align="center">
+  <img src="docs/assets/terminal.svg" width="760" alt="icloudseal-mcp setup — five hosts, then mail stats">
+</p>
 
-Principles:
-- Data stays on this Mac except what enters the active agent/model context.
-- Mutating CLI commands are dry-run by default and require `--apply`.
-- MCP mutations use prepare → show exact preview → user OK in chat → native
-  macOS authentication (`native-approval.swift`).
-- MCP approval payloads contain immutable resource identities/snapshots rather
-  than mutable search queries or arbitrary plan paths.
-- MCP plans and exports are jailed to owner-only App Support directories; an
-  existing output is never overwritten implicitly.
-- App Support dir + Keychain service: `icloudseal-mcp` (migrated from legacy `icloud-mail-agent`).
+An unofficial local iCloud layer for the same Mac user who unlocked the session. The agent can read Mail, Contacts, Calendar, Messages, Notes, Drive, Photos, Safari, Music, Weather, Maps, Shortcuts, and Health status. It cannot mutate a single object until a native macOS dialog shows the **exact immutable preview** and you approve it with Touch ID or your login password.
 
-## Two CLIs, one command set
+Part of the seal family with [`whatseal`](https://github.com/edosulai/whatseal-mcp) (WhatsApp) and `instaseal-mcp` (Instagram). Started as `icloud-mail-agent` → `icloud-agent` → **`icloudseal-mcp`**.
 
-| Command | Scope |
-|---|---|
-| `icloudseal-mcp <domain> <action>` | Multi-domain entry point (`mail`, `contacts`, …) |
-| `icloudseal-mcp install-skill` | Copy bundled `/icloudseal` skill to `~/.copilot/skills/` (default host) |
-| `icloudseal-mcp uninstall-skill` | Remove only that skill copy |
-| `mail-agent <action>` | Legacy alias = `icloudseal-mcp mail <action>` (kept for back-compat) |
+This is not CloudKit, WeatherKit, or the iCloud web API. Apple can change IMAP, CardDAV, CalDAV, or Automation rules at any time.
 
-So `mail-agent list` and `icloudseal-mcp mail list` are identical.
-MCP setup (VS Code / Copilot / Claude Desktop)
+---
 
-Catalog key: `icloudseal` (dotfiles reconcile). Point the IDE at `mcp-wrapper.sh`:
+## Quick start
+
+```bash
+pipx install icloudseal-mcp
+# or: uv tool install icloudseal-mcp
+icloudseal-mcp setup
+icloudseal-mcp mail setup --email you@icloud.com
+icloudseal-mcp mail stats
+```
+
+`setup` copies `/icloudseal` to Copilot, Claude, Codex, `.agents`, and Hermes. Whole-directory home symlinks (dotfiles checkouts) are skipped unless `--force`. It does **not** store credentials.
+
+iCloud blocks regular passwords for IMAP/CardDAV. Generate an app-specific password at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords (`xxxx-xxxx-xxxx-xxxx`).
+
+From a git checkout:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+icloudseal-mcp setup
+```
+
+Hermes MCP (installed package):
+
+```bash
+printf 'Y\n' | hermes mcp add icloudseal --command icloudseal-mcp-server
+```
+
+From a checkout, point Hermes at `mcp-wrapper.sh` instead. Restart Hermes after adding. Verify with both `hermes mcp list` and `hermes config get mcp_servers`.
+
+---
+
+## How it works
+
+<p align="center">
+  <img src="docs/assets/flow.svg" width="760" alt="Read freely, prepare a draft, approve with Touch ID, then mutate">
+</p>
+
+1. **Reads are free.** No Touch ID for list/search/peek. Data stays on this Mac except what enters the chat.
+2. **Prepare freezes the exact target.** `icloud_prepare_*` stores a single-use, TTL-bound draft with immutable identities — not a live search query.
+3. **Touch ID seals it.** `icloud_request_local_approval` shows that frozen preview in a native dialog. Timeout or uncertainty → `icloud_action_outcome`. Never re-prepare a duplicate mutate.
+4. **CLI stays dry-run** unless `--apply`. MCP never claims success unless approval / outcome reports it.
+
+One Keychain item (service `icloudseal-mcp`) authenticates IMAP, SMTP, CardDAV, and CalDAV. Plans, exports, backups, and the compiled helper live under owner-only App Support.
+
+---
+
+## MCP setup
+
+Catalog key: `icloudseal`. Default `install-skill` / `setup` hosts: **copilot, claude, codex, agents, hermes**.
+
+VS Code / Copilot `mcp.json` (git checkout):
 
 ```json
 {
@@ -72,20 +102,27 @@ Catalog key: `icloudseal` (dotfiles reconcile). Point the IDE at `mcp-wrapper.sh
 }
 ```
 
-The wrapper self-bootstraps `.venv` + editable install if needed, installs
-the bundled `/icloudseal` skill to Copilot (stderr only; stdout stays MCP
-stdio), then runs `python -m icloudseal_mcp.mcp.server`.
+Installed package:
 
-Packaged skill: [`skills/icloudseal/SKILL.md`](skills/icloudseal/SKILL.md).
-Default `install-skill` host is **copilot only**. Pass `--platform all` or
-a comma list (`claude,codex,…`) explicitly. A workspace copy plus the
-global Copilot copy can both be discovered — that is expected.
+```json
+{
+  "servers": {
+    "icloudseal": {
+      "type": "stdio",
+      "command": "icloudseal-mcp-server"
+    }
+  }
+}
+```
+
+The checkout wrapper self-bootstraps `.venv` + editable install if needed, installs the bundled skill on the default hosts (stderr only; stdout stays MCP stdio), then runs `python -m icloudseal_mcp.mcp.server`. Packaged skill: [`skills/icloudseal/SKILL.md`](skills/icloudseal/SKILL.md).
+
+On Hermes Agent, tools show up as `mcp_icloudseal_icloud_*` or deferred `mcp__icloudseal__icloud_*`. After a successful add, enable them in the current session (`setup_mcp`) or restart Hermes.
 
 ### Agent workflow
 
 1. First call: `icloud_doctor` or `icloud_status`
-2. Reads: no Touch ID (`icloud_mail_*`, `icloud_contacts_*`, `icloud_messages_*`, …)
-  Local export/plan tools write only to managed App Support directories.
+2. Reads: no Touch ID (`icloud_mail_*`, `icloud_contacts_*`, `icloud_messages_*`, …). Local export/plan tools write only to managed App Support directories.
 3. Mutations: `icloud_prepare_*` → show exact preview → user OK → `icloud_request_local_approval`
 4. After timeout: `icloud_action_outcome` (never blind re-prepare)
 
@@ -110,6 +147,10 @@ global Copilot copy can both be discovered — that is expected.
 | Shortcuts | list + prepare run (exact name, optional frozen text input) |
 | Gate | `icloud_request_local_approval`, `icloud_action_outcome` |
 
+`icloudseal-mcp setup` / `install-skill` copies `/icloudseal`. `uninstall-skill` removes only that skill copy. `mail-agent <action>` remains a legacy alias for `icloudseal-mcp mail <action>`.
+
+---
+
 ## Architecture
 
 ```
@@ -121,17 +162,13 @@ global Copilot copy can both be discovered — that is expected.
                     ▼              ▼
         ┌──────────────────────────────────────────┐
         │  icloudseal_mcp/                         │
-        │   mcp/       server + approval + services│
-        │   auth/paths/common   shared infra       │
-        │   cli.py     icloudseal-mcp / mail-agent │
-        │   dav/       shared CardDAV/CalDAV       │
-        │   mail/ IMAP  contacts/ CardDAV          │
-        │   calendar/ CalDAV  messages/ chat.db    │
-        │   notes/ AppleScript  drive/ fs  photos/ │
-        │   safari/ music/ weather/ maps/          │
-        │   health/ ops/ shortcuts/                │
-        │   native-approval.swift (Touch ID gate)  │
-                   └──────────────────────────────────────────┘
+        │   mcp/       server + approval + tools   │
+        │   mail/ contacts/ calendar/ messages/    │
+        │   notes/ drive/ photos/ safari/ music/   │
+        │   weather/ maps/ health/ ops/ shortcuts  │
+        └──────────────────────────────────────────┘
+                             │
+                             ▼
                              IMAP/SMTP/DAV · local DB · AppleScript · Open-Meteo
 ```
 
@@ -139,6 +176,28 @@ global Copilot copy can both be discovered — that is expected.
 Keychain (service `icloudseal-mcp`) authenticates IMAP, SMTP, **and** CardDAV/CalDAV.
 **No external LLM API** — data stays on this Mac except what enters the chat.
 
+---
+
+## Domains
+
+Fourteen domains live (CLI + MCP):
+
+- **Mail (IMAP + SMTP)** — sync/list/triage plus gated cleanup, send (reply/attach), forward, flags, move, trash, and create-folder.
+- **Contacts (CardDAV)** — list/search/export plus gated create/update/delete.
+- **Calendar + Reminders (CalDAV)** — list/timezones plus gated add/update/rm/done with ATTENDEE PARTSTAT, reminder PRIORITY, TZID, and validated RRULE/VALARM.
+- **Messages / SMS** — read `chat.db` plus gated AppleScript send (optional file attach).
+- **Notes (AppleScript)** — list/search/read/accounts/folders plus gated create (account picker)/update/delete.
+- **iCloud Drive (filesystem)** — ls/tree/find/read plus gated mkdir/put/rm/rename/move/copy (rm → Trash).
+- **Photos** — stats/albums/list plus gated export, favorite, album-add/create/remove/delete. Import is not implemented.
+- **Safari (AppleScript + FDA store)** — tabs/current/page-text/extract plus bookmarks/history reads. Gated http(s) open, search, close-tab, bookmarks-bar add/rm, and Reading List add/rm.
+- **Music (AppleScript)** — now-playing plus library/playlist search (names only). Gated playpause/next/previous, volume, shuffle, repeat, play-by-name, playlist-play.
+- **Weather (Open-Meteo)** — current plus daily forecast; hourly and 15-minute rows are opt-in.
+- **Maps (maps.apple.com)** — local search/directions URL plus gated open.
+- **Health** — status only, fail-closed. No HealthKit scrape.
+- **Ops** — write a mail-cleanup LaunchAgent plist. Does not `launchctl load`.
+- **Shortcuts** — list plus gated run by exact name.
+
+---
 
 ## Setup (one-time)
 

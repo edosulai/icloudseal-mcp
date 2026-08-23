@@ -1,0 +1,12 @@
+include LICENSE
+include README.md
+include native-approval.swift
+include mcp-wrapper.sh
+include pyproject.toml
+include AGENTS.md
+include CLAUDE.md
+recursive-include skills *
+recursive-include docs *
+recursive-include tests *
+recursive-include icloudseal_mcp *
+global-exclude __pycache__ *.py[cod] .DS_Store

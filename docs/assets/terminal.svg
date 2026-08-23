@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="icloudseal-mcp setup — five hosts, then mail stats">
+  <rect width="760" height="220" rx="16" fill="#0B1220"/>
+  <circle cx="28" cy="28" r="6" fill="#F87171"/>
+  <circle cx="48" cy="28" r="6" fill="#FBBF24"/>
+  <circle cx="68" cy="28" r="6" fill="#34D399"/>
+  <text x="96" y="32" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">icloudseal-mcp</text>
+  <text x="28" y="72" fill="#7DD3FC" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">$ icloudseal-mcp setup</text>
+  <text x="28" y="96" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">installed: copilot claude codex agents hermes</text>
+  <text x="28" y="128" fill="#7DD3FC" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">$ icloudseal-mcp mail stats</text>
+  <text x="28" y="152" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">INBOX              42</text>
+  <text x="28" y="176" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Archive            18</text>
+  <text x="28" y="200" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">mutations stay sealed until Touch ID</text>
+</svg>

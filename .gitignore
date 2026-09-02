@@ -45,6 +45,9 @@ reports/
 *.mbox
 *.vcf
 
+# Session / machine-local notes (never public)
+icloudseal-dev-report.md
+
 # Generated / vendor / editor
 graphify-out/
 .copilot/

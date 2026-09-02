@@ -13,8 +13,8 @@ list, create, move, delete). Reads are free. Every mutation is sealed until
 Touch ID or the macOS login password.
 
 Prefer MCP tools when they are available. The CLI is `icloudseal-mcp <domain>
-<action>` (`pipx install icloudseal-mcp`, `uv tool install icloudseal-mcp`, or a
-git checkout). Do not invent mail, events, contacts, or claim a mutation
+<action>` (`pipx install git+https://github.com/edosulai/icloudseal-mcp.git@v0.9.1`
+or a git checkout). Do not invent mail, events, contacts, or claim a mutation
 succeeded.
 On Hermes Agent, MCP tools show up two ways:
 - native prefix `mcp_icloudseal_icloud_*`
@@ -105,6 +105,24 @@ go through `icloud_prepare_notes_update` / `applescript.update_note`. That
 path `html.escape`s the body and flattens tables into pipe-text. Write raw
 HTML with `set body of note id …` after Touch ID, and load
 `apple-notes-native-format`. Tables only for tabular data.
+Raw HTML `<a href="URL">TEXT/URL</a>` inside `<div>` is parsed by Notes as native clickable blue hyperlinks (note: `href` is stripped inside `<table>` cells, so place links in `<div>` or `<ul>` near tables).
+
+Notes **images/GIF/video** are attachments, not HTML. There is no
+`icloud_prepare_notes_attach`. After Touch ID:
+`make new attachment at note with data POSIX file`. Do not rewrite `body`
+after attaching. Load `apple-notes-native-format`.
+
+If `calendar calendars` CalDAV PROPFIND returns HTTP 401 while doctor still
+marks calendar ready, Calendar.app / Reminders.app AppleScript is the live
+iCloud path. Event `recurrence` is RFC 2445 (`FREQ=WEEKLY;BYDAY=MO`). Display
+alarm `trigger interval` is minutes (negative = before). Do not mint CalDAV
+credentials unless the user asked for calendar setup.
+
+If this chat has no icloudseal MCP (`hermes mcp list` empty / `setup_mcp`
+404), do not stall. From the checkout: `register_all_executors()`, then
+`approval.prepare_action` → show preview → `approval.request_local_approval`.
+Custom actions need `register_executor`. Use App Support
+`bin/native-approval`; do not recompile unless the binary is missing.
 
 ### Step 4 — Do not freelance the machine
 

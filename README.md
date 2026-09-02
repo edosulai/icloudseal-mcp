@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-Touch%20ID-111?logo=apple&amp;logoColor=white">
   <img alt="Python" src="https://img.shields.io/badge/python-%3E%3D3.11-3776ab?logo=python&amp;logoColor=white">
-  <img alt="PyPI" src="https://img.shields.io/pypi/v/icloudseal-mcp">
+  <img alt="Release" src="https://img.shields.io/github/v/release/edosulai/icloudseal-mcp">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-0d9488">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-1f2328">
 </p>
@@ -40,8 +40,8 @@ This is not CloudKit, WeatherKit, or the iCloud web API. Apple can change IMAP, 
 ## Quick start
 
 ```bash
-pipx install icloudseal-mcp
-# or: uv tool install icloudseal-mcp
+pipx install git+https://github.com/edosulai/icloudseal-mcp.git@v0.9.1
+# or: uv tool install git+https://github.com/edosulai/icloudseal-mcp.git@v0.9.1
 icloudseal-mcp setup
 icloudseal-mcp mail setup --email you@icloud.com
 icloudseal-mcp mail stats
@@ -51,7 +51,7 @@ icloudseal-mcp mail stats
 
 iCloud blocks regular passwords for IMAP/CardDAV. Generate an app-specific password at [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords (`xxxx-xxxx-xxxx-xxxx`).
 
-From a git checkout:
+From a git checkout (dev):
 
 ```bash
 python3.13 -m venv .venv
@@ -207,12 +207,8 @@ iCloud blocks regular passwords for IMAP/CardDAV. Generate one at
 Passwords** (format `xxxx-xxxx-xxxx-xxxx`).
 
 ### 2. Install
-```bash
-cd /path/to/icloudseal-mcp
-python3.13 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
+
+Same as [Quick start](#quick-start). Prefer `pipx` / `uv tool` from the git tag. A local checkout is only needed if you are changing the code.
 
 ### 3. Store credentials
 ```bash
